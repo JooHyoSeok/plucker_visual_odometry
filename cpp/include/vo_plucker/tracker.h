@@ -52,6 +52,9 @@ struct TrackerParams {
   bool use_depth = false;     // FrameObs::depth 사용 (깊이 초기화 + 깊이 맵 점)
   bool depth_6dof = true;     // use_depth일 때 2D-2D 대신 맵 기준 6-DoF로 추적
   bool pose_g2o = false;      // 6-DoF 추정을 g2o motion-only BA로 (점만, 선 edge는 다음 단계). false = 자체 LM (점+선)
+  bool local_ba = false;      // 키프레임마다 local BA (g2o, 점만): 키프레임 선택은 is_keyframe
+  int ba_window = 10;         // local BA에서 최적화하는 최근 키프레임 수
+  int ba_fixed = 10;          // 같은 점을 보는 그 앞 키프레임을 최대 이만큼 고정
 };
 
 class VOTracker {
@@ -83,6 +86,10 @@ class VOTracker {
   int n_still = 0;       // 정지로 판정한 프레임 수
   int n_map6dof = 0;     // parallax가 작아서 맵 기준 6-DoF로 추정한 프레임 수
   long n_depth_pts = 0;  // 깊이로 만든 맵 점 수
+  int n_ba = 0;          // local BA 실행 수
+  double ba_ms = 0;      // local BA 누적 시간
+  long ba_points = 0, ba_outliers = 0;
+  double ba_rms_before = 0, ba_rms_after = 0;  // 누적 (실행 수로 나누면 평균)
   int failed_at = -1;  // tracking 실패 프레임 (-1 = 정상), 실패 후에는 추적 안 함 (relocalization 없음)
   std::string fail_reason;
   std::string init_note;  // 마지막 초기화 시도가 거절된 이유

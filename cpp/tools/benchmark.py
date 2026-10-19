@@ -8,12 +8,15 @@ Benchmark run_vo over many sequences at once, so changes are judged on medians i
   modes  : mono (all), depth (icra: iPhone LiDAR depth/, confidence >= 1)
   metric : on the tracked part (from the first pose until tracking stops)
            drift % = Sim(3)-aligned ATE RMSE / GT path length * 100, ok = tracked >= 95 % of frames
+           t_rel % / r_rel deg/100m = KITTI devkit relative error over 100..800 m segments (start every 10 frames),
+           translation scaled by the Sim(3) scale (monocular) -> local accuracy, less dominated by where it drifted
            depth mode also: SE(3)-aligned ATE without scale fit (metric scale)
 
 usage:
   python3 benchmark.py --out DIR [--suite kitti,icra] [--modes mono,depth] [--seqs REGEX] [--jobs 8]
                        [--max-frames N] [--args="extra run_vo args"] [--run-vo PATH]
   python3 benchmark.py --compare DIR_A DIR_B          # per-sequence drift %, A vs B
+  python3 benchmark.py --reeval DIR                    # recompute results.csv from the saved trajectories/logs
 """
 import argparse
 import csv
@@ -33,7 +36,7 @@ KITTI = Path.home() / "Desktop/hyoseok/KITTI_Dataset/dataset/sequences"
 KITTI_GT = Path.home() / "Desktop/hyoseok/KITTI_poses/dataset/poses"
 ICRA = Path.home() / "Desktop/hyoseok/2026_ICRA_Dataset/ICRA_Final_Dataset"
 FIELDS = ["suite", "seq", "mode", "frames", "tracked", "tracked_pct", "path_m", "ate_sim3_m", "drift_pct",
-          "ate_se3_m", "scale", "fps", "fail"]
+          "t_rel_pct", "r_rel_deg100m", "ate_se3_m", "scale", "fps", "fail"]
 
 
 def kitti_jobs(seqs):
@@ -77,6 +80,25 @@ def run(job, run_vo, out, extra, max_frames):
     return evaluate(job, traj, log.read_text(), time.time() - t0)
 
 
+def kitti_rpe(Pe, Pg, s, lengths=range(100, 801, 100), step=10):
+    """KITTI devkit relative error. Pe/Pg: (n,3,4) T_wc, est translations scaled by s.
+    returns (t_rel %, r_rel deg/100m) averaged over all segments, nan if the path is shorter than 100 m"""
+    T = lambda P: np.vstack([np.hstack([P[:, :3], P[:, 3:]]), [0, 0, 0, 1]])
+    Te = [T(np.hstack([P[:, :3], s * P[:, 3:]])) for P in Pe]
+    Tg = [T(P) for P in Pg]
+    dist = np.r_[0, np.cumsum(np.linalg.norm(np.diff(Pg[:, :, 3], axis=0), axis=1))]
+    te, re = [], []
+    for i in range(0, len(Pg), step):
+        for L in lengths:
+            j = np.searchsorted(dist, dist[i] + L)
+            if j >= len(Pg):
+                continue
+            E = np.linalg.inv(np.linalg.inv(Te[i]) @ Te[j]) @ (np.linalg.inv(Tg[i]) @ Tg[j])
+            te.append(np.linalg.norm(E[:3, 3]) / L)
+            re.append(np.arccos(np.clip((np.trace(E[:3, :3]) - 1) / 2, -1, 1)) / L)
+    return (100 * np.mean(te), np.degrees(np.mean(re)) * 100) if te else (np.nan, np.nan)
+
+
 def evaluate(job, traj, log, wall):
     m = re.search(r"(\d+)/(\d+) frames tracked", log)
     tracked, frames = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
@@ -85,12 +107,14 @@ def evaluate(job, traj, log, wall):
     fail = re.search(r"FAILED at \d+: (.*?) \|", log)
     row = dict(suite=job["suite"], seq=job["seq"], mode=job["mode"], frames=frames, tracked=tracked,
                tracked_pct=100 * tracked / max(frames, 1), fps=fps, fail=fail.group(1) if fail else "",
-               path_m=0, ate_sim3_m=np.nan, drift_pct=np.nan, ate_se3_m=np.nan, scale=np.nan)
+               path_m=0, ate_sim3_m=np.nan, drift_pct=np.nan, t_rel_pct=np.nan, r_rel_deg100m=np.nan,
+               ate_se3_m=np.nan, scale=np.nan)
     if tracked < 3 or not traj.exists():
         return row
-    C = np.loadtxt(traj).reshape(-1, 12)[:, [3, 7, 11]]
-    P = np.loadtxt(job["gt"]).reshape(-1, 12)[job["start"]::job["stride"]][f0:f0 + len(C)]
-    C, G = C[:len(P)], P[:, [3, 7, 11]]
+    Pe = np.loadtxt(traj).reshape(-1, 3, 4)
+    P = np.loadtxt(job["gt"]).reshape(-1, 12)[job["start"]::job["stride"]][f0:f0 + len(Pe)]
+    Pe = Pe[:len(P)]
+    C, G = Pe[:, :, 3], P[:, [3, 7, 11]]
     row["path_m"] = float(np.linalg.norm(np.diff(G, axis=0), axis=1).sum())
     for with_scale in (True, False):
         mc, mg = C.mean(0), G.mean(0)
@@ -103,23 +127,29 @@ def evaluate(job, traj, log, wall):
         if with_scale:
             row["ate_sim3_m"], row["scale"] = ate, float(s)
             row["drift_pct"] = 100 * ate / max(row["path_m"], 1e-9)
+            row["t_rel_pct"], row["r_rel_deg100m"] = kitti_rpe(Pe, P.reshape(-1, 3, 4), s)
         elif job["mode"] == "depth":
             row["ate_se3_m"] = ate
     return row
 
 
 def summarize(rows):
-    print(f"\n{'run':34s} {'tracked':>8s} {'path':>8s} {'Sim3 ATE':>9s} {'drift':>7s} {'SE3 ATE':>8s} {'fps':>5s}  fail")
+    print(f"\n{'run':34s} {'tracked':>8s} {'path':>8s} {'Sim3 ATE':>9s} {'drift':>7s} {'t_rel':>7s} {'r_rel':>6s} "
+          f"{'SE3 ATE':>8s} {'fps':>5s}  fail")
     for r in rows:
         print(f"{r['suite'] + '_' + r['seq'] + '_' + r['mode']:34s} {r['tracked_pct']:7.0f}% {r['path_m']:7.0f}m "
-              f"{r['ate_sim3_m']:8.2f}m {r['drift_pct']:6.2f}% {r['ate_se3_m']:7.2f}m {r['fps']:5.1f}  {r['fail']}")
+              f"{r['ate_sim3_m']:8.2f}m {r['drift_pct']:6.2f}% {r['t_rel_pct']:6.2f}% {r['r_rel_deg100m']:6.2f} "
+              f"{r['ate_se3_m']:7.2f}m {r['fps']:5.1f}  {r['fail']}")
     print()
     for key in sorted({(r["suite"], r["mode"]) for r in rows}):
         g = [r for r in rows if (r["suite"], r["mode"]) == key]
         d = np.array([r["drift_pct"] for r in g], float)
+        tr = np.array([r["t_rel_pct"] for r in g], float)
+        rr = np.array([r["r_rel_deg100m"] for r in g], float)
         ok = sum(r["tracked_pct"] >= 95 for r in g)
         print(f"[{key[0]} {key[1]}] {len(g)} runs | tracked >= 95%: {ok}/{len(g)} | drift % median {np.nanmedian(d):.2f}, "
-              f"mean {np.nanmean(d):.2f} | mean fps {np.mean([r['fps'] for r in g]):.1f}")
+              f"mean {np.nanmean(d):.2f} | t_rel % median {np.nanmedian(tr):.2f} | r_rel deg/100m median "
+              f"{np.nanmedian(rr):.3f} | mean fps {np.mean([float(r['fps']) for r in g]):.1f}")
 
 
 def compare(a, b):
@@ -146,9 +176,21 @@ def main():
     ap.add_argument("--args", default="", help='extra run_vo arguments for every run, as --args="--opt ..."')
     ap.add_argument("--run-vo", default=str(HERE.parent / "build/run_vo"))
     ap.add_argument("--compare", nargs=2, metavar=("DIR_A", "DIR_B"))
+    ap.add_argument("--reeval", metavar="DIR")
     o = ap.parse_args()
     if o.compare:
         return compare(*o.compare)
+    if o.reeval:
+        out = Path(o.reeval)
+        jobs = list(kitti_jobs(".")) + list(icra_jobs(".", ["mono", "depth"], out))
+        rows = [evaluate(j, out / f"{j['suite']}_{j['seq']}_{j['mode']}.txt",
+                         (out / f"{j['suite']}_{j['seq']}_{j['mode']}.log").read_text(), 0)
+                for j in jobs if (out / f"{j['suite']}_{j['seq']}_{j['mode']}.log").exists()]
+        with open(out / "results.csv", "w", newline="") as f:
+            w = csv.DictWriter(f, FIELDS)
+            w.writeheader()
+            w.writerows(rows)
+        return summarize(rows)
     if not o.out:
         sys.exit(__doc__)
     out = Path(o.out)

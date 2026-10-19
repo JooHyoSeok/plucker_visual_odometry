@@ -304,13 +304,15 @@ bool VOTracker::track(int k) {
 
   poses[k] = Pose{orthonormalize(p1.R), p1.t};
   has_pose[k] = 1;
-  if (!prm.kf_mapping) {
-    update_map(k);
-  } else if (k > init_frame_ && is_keyframe(k, kept.X.size())) {
-    kfs.push_back(k);
-    update_map(k);
-  }
+  const bool kf = k > init_frame_ && (prm.kf_mapping || prm.local_ba) && is_keyframe(k, kept.X.size());
+  if (kf) kfs.push_back(k);
+  if (!prm.kf_mapping || kf) update_map(k);
   if (prm.use_depth) add_depth_points(k);  // 깊이 있는 점은 삼각측량 결과보다 우선
+  if (kf && prm.local_ba) {
+    const LocalBAStats s = vp::local_ba(*this, prm.ba_window, prm.ba_fixed);
+    ++n_ba, ba_ms += s.ms, ba_points += s.points, ba_outliers += s.outliers;
+    ba_rms_before += s.rms_before, ba_rms_after += s.rms_after;
+  }
   return true;
 }
 

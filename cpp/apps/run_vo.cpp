@@ -1,7 +1,7 @@
 // C++ monocular VO (points + Plücker lines): images in one by one -> pose out. No loop closure yet.
 // usage: run_vo [n_frames] --video PATH|CAM_INDEX [--gt PATH] [--calib fx,fy,cx,cy] [--no-lines] [--traj OUT.txt]
 //               [--init-frame N | --init-px P] [--kf-mapping] [--no-reattach]
-//               [--rel-static] [--drop-dynamic] [--rel-min-px P] [--resize S] [--stride N] [--start N] [--min-parallax DEG] [--init-min-points N] [--sim3-align] [--pose-g2o] [--no-viewer] [--snapshot OUT.png]
+//               [--rel-static] [--drop-dynamic] [--rel-min-px P] [--resize S] [--stride N] [--start N] [--min-parallax DEG] [--init-min-points N] [--sim3-align] [--pose-g2o] [--local-ba] [--ba-window N] [--ba-fixed N] [--kf-parallax PX] [--no-viewer] [--snapshot OUT.png]
 //   --resize S : 영상과 intrinsic을 S배 (고해상도 입력용, 예: iPhone 1920x1440 -> 0.5)
 //   --stride N : N 프레임마다 하나만 사용 (고 fps / 느린 이동용). GT도 같은 간격으로 맞춤
 //   --start N  : 처음 N 프레임 건너뛰기 (예: 시작이 제자리 회전뿐인 핸드헬드 영상). GT도 N부터
@@ -149,6 +149,10 @@ int main(int argc, char** argv) {
   prm.use_depth = depth_pat != nullptr;
   prm.depth_6dof = !flag(argc, argv, "--depth-2d2d");
   prm.pose_g2o = flag(argc, argv, "--pose-g2o");  // 6-DoF 추정을 g2o motion-only BA로
+  prm.local_ba = flag(argc, argv, "--local-ba");  // 키프레임마다 local BA (g2o, 점만)
+  prm.ba_window = std::atoi(arg(argc, argv, "--ba-window", "10"));
+  prm.ba_fixed = std::atoi(arg(argc, argv, "--ba-fixed", "10"));
+  prm.kf_parallax_px = std::atof(arg(argc, argv, "--kf-parallax", "10"));  // 키프레임: 회전 보정 parallax 중앙값 [px]
   // 초기화: --init-frame N이면 그 프레임, 아니면 frame 0 대비 픽셀 이동 중앙값이 --init-px 이상이 될 때 (07처럼 천천히 출발해도)
   const int init_fixed = std::atoi(arg(argc, argv, "--init-frame", "0"));
   const double init_px = std::atof(arg(argc, argv, "--init-px", "20"));  // 이 이상이면 초기화 시도, 품질이 안 되면 다음 프레임 재시도
@@ -262,6 +266,12 @@ int main(int argc, char** argv) {
               prm.kf_mapping ? "keyframes" : "every frame");
   std::printf("  map points re-attached after track loss: %ld (%.1f / frame) | dynamic tracks dropped: %ld (%.1f / frame)\n",
               n_reattach, double(n_reattach) / k, n_dynamic, double(n_dynamic) / k);
+  if (prm.local_ba)
+    std::printf("  local BA: %d runs, %.1f ms/run (%.1f ms/frame), %.0f points/run, %.1f outlier points removed/run, "
+                "reprojection RMS %.2f -> %.2f px\n",
+                vo.n_ba, vo.ba_ms / std::max(vo.n_ba, 1), vo.ba_ms / k, double(vo.ba_points) / std::max(vo.n_ba, 1),
+                double(vo.ba_outliers) / std::max(vo.n_ba, 1), vo.ba_rms_before / std::max(vo.n_ba, 1),
+                vo.ba_rms_after / std::max(vo.n_ba, 1));
   if (prm.use_depth)
     std::printf("  depth: %.0f points/frame with valid depth -> %ld map points from depth\n", double(n_depth_obs) / k,
                 vo.n_depth_pts);
