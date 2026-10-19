@@ -1,7 +1,10 @@
 // C++ monocular VO (points + Plücker lines): images in one by one -> pose out. No loop closure yet.
 // usage: run_vo [n_frames] --video PATH|CAM_INDEX [--gt PATH] [--calib fx,fy,cx,cy] [--no-lines] [--traj OUT.txt]
 //               [--init-frame N | --init-px P] [--kf-mapping] [--no-reattach]
-//               [--rel-static] [--drop-dynamic] [--no-viewer] [--snapshot OUT.png]
+//               [--rel-static] [--drop-dynamic] [--rel-min-px P] [--resize S] [--stride N] [--start N] [--min-parallax DEG] [--init-min-points N] [--no-viewer] [--snapshot OUT.png]
+//   --resize S : 영상과 intrinsic을 S배 (고해상도 입력용, 예: iPhone 1920x1440 -> 0.5)
+//   --stride N : N 프레임마다 하나만 사용 (고 fps / 느린 이동용). GT도 같은 간격으로 맞춤
+//   --start N  : 처음 N 프레임 건너뛰기 (예: 시작이 제자리 회전뿐인 핸드헬드 영상). GT도 N부터
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -101,24 +104,44 @@ int main(int argc, char** argv) {
   prm.use_lines = !flag(argc, argv, "--no-lines");
   prm.kf_mapping = flag(argc, argv, "--kf-mapping");
   prm.rel_min_px = std::atof(arg(argc, argv, "--rel-min-px", "0"));
+  // 점 삼각측량 최소 parallax [deg] (KITTI 기준 2), 초기화에 필요한 맵 점 수: 실내/느린 핸드헬드는 1, 50 정도
+  prm.point_min_deg = std::atof(arg(argc, argv, "--min-parallax", "2"));
+  prm.init_min_points = std::atoi(arg(argc, argv, "--init-min-points", "100"));
+  const double rp_dist = std::atof(arg(argc, argv, "--rel-dist", "1e6"));  // 프레임 간 2D-2D recoverPose distanceThresh
   // 초기화: --init-frame N이면 그 프레임, 아니면 frame 0 대비 픽셀 이동 중앙값이 --init-px 이상이 될 때 (07처럼 천천히 출발해도)
   const int init_fixed = std::atoi(arg(argc, argv, "--init-frame", "0"));
   const double init_px = std::atof(arg(argc, argv, "--init-px", "20"));  // 이 이상이면 초기화 시도, 품질이 안 되면 다음 프레임 재시도
+  const double resize = std::atof(arg(argc, argv, "--resize", "1"));
+  const int stride = std::max(1, std::atoi(arg(argc, argv, "--stride", "1")));
+  const int start = std::max(0, std::atoi(arg(argc, argv, "--start", "0")));
   const char* gt_path = arg(argc, argv, "--gt", nullptr);
-  const auto gt = gt_path ? load_kitti(gt_path) : std::vector<Eigen::Matrix<double, 3, 4>>{};
+  std::vector<Eigen::Matrix<double, 3, 4>> gt;
+  if (gt_path) {
+    const auto all = load_kitti(gt_path);
+    for (size_t i = start; i < all.size(); i += stride) gt.push_back(all[i]);
+  }
 
   cv::VideoCapture cap;
   std::isdigit(src[0]) && !std::strchr(src, '.') ? cap.open(std::atoi(src)) : cap.open(src);
   cv::Mat frame, gray;
+  auto read = [&]() {  // stride만큼 건너뛰고 한 장, resize 적용
+    for (int s = 1; s < stride; ++s)
+      if (!cap.grab()) return false;
+    if (!cap.read(frame)) return false;
+    if (resize != 1) cv::resize(frame, frame, cv::Size(), resize, resize, cv::INTER_AREA);
+    return true;
+  };
+  for (int s = 0; s < start; ++s) cap.grab();
   if (!cap.read(frame)) {
     std::fprintf(stderr, "cannot read video/images/camera: %s\n", src);
     return 1;
   }
-  const Camera cam(fx, fy, cx, cy, frame.cols, frame.rows);
+  if (resize != 1) cv::resize(frame, frame, cv::Size(), resize, resize, cv::INTER_AREA);
+  const Camera cam(fx * resize, fy * resize, cx * resize, cy * resize, frame.cols, frame.rows);
   Frontend front;
   VOTracker vo(cam, prm);
-  std::printf("source %s, %dx%d, K=(%g,%g,%g,%g), lines %d\n", src, frame.cols, frame.rows, fx, fy, cx, cy,
-              prm.use_lines);
+  std::printf("source %s, %dx%d, K=(%g,%g,%g,%g), stride %d, lines %d\n", src, frame.cols, frame.rows, cam.fx, cam.fy,
+              cam.cx, cam.cy, stride, prm.use_lines);
 #ifdef VP_WITH_VIEWER
   std::unique_ptr<Viewer> viewer;
   if (!flag(argc, argv, "--no-viewer")) {
@@ -140,7 +163,7 @@ int main(int argc, char** argv) {
   for (; k < n_max; ++k) {
     if (k) {
       const auto t0 = Clock::now();
-      if (!cap.read(frame)) break;
+      if (!read()) break;
       t_read += ms_since(t0);
     }
     auto t0 = Clock::now();
@@ -149,7 +172,7 @@ int main(int argc, char** argv) {
     if (const auto pred = vo.predict(); pred && !no_reattach) n_reattach += front.reattach(cam, vo, *pred, o);
     t_front += ms_since(t0);
     t0 = Clock::now();
-    const std::optional<Pose> rel = k ? relative_pose(cam, vo.obs.back(), o, rel_all ? nullptr : &vo.map_p) : std::nullopt;
+    const std::optional<Pose> rel = k ? relative_pose(cam, vo.obs.back(), o, rel_all ? nullptr : &vo.map_p, rp_dist) : std::nullopt;
     std::optional<Pose> init;
     if (!vo.initialized() && k > 0 &&
         (init_fixed > 0 ? k == init_fixed : median_shift(vo.obs[0], o, 50) >= init_px)) {
@@ -159,7 +182,9 @@ int main(int argc, char** argv) {
     t0 = Clock::now();
     const bool was_init = vo.initialized();
     vo.add(std::move(o), rel, init);
-    if (init && !was_init) std::printf("  init at frame %d: %s\n", k, vo.initialized() ? "ok" : "rejected, retry next frame");
+    if (init && !was_init)
+      std::printf("  init at frame %d: %s\n", k,
+                  vo.initialized() ? "ok" : ("rejected (" + vo.init_note + "), retry next frame").c_str());
     if (!keep_dynamic) {
       const std::vector<int> dyn = vo.inconsistent_tracks(3.0);
       front.drop(dyn), n_dynamic += dyn.size();

@@ -306,7 +306,7 @@ int Frontend::reattach(const Camera& cam, const VOTracker& vo, const Pose& pred,
   return added;
 }
 
-Pose robust_init(const Camera& c, const FrameObs& o0, const FrameObs& oI) {
+Pose robust_init(const Camera& c, const FrameObs& o0, const FrameObs& oI, double dist_thresh) {
   std::vector<int> ids;
   for (int j : o0.pid)
     if (oI.point(j)) ids.push_back(j);
@@ -319,7 +319,7 @@ Pose robust_init(const Camera& c, const FrameObs& o0, const FrameObs& oI) {
   cv::Mat K, inl, R, t;
   cv::eigen2cv(c.K, K);
   const cv::Mat E = cv::findEssentialMat(p1, p2, K, cv::RANSAC, 0.999, 1.0, 1000, inl);
-  cv::recoverPose(E.rowRange(0, 3), p1, p2, K, R, t, inl);  // 해가 여러 개면 첫 번째
+  cv::recoverPose(E.rowRange(0, 3), p1, p2, K, R, t, dist_thresh, inl);  // 해가 여러 개면 첫 번째
   std::vector<Vec2> x1, x2;
   for (size_t i = 0; i < ids.size(); ++i) {
     if (!inl.at<uchar>(i)) continue;
@@ -342,7 +342,7 @@ void Frontend::drop(const std::vector<int>& ids) {
 }
 
 std::optional<Pose> relative_pose(const Camera& c, const FrameObs& a, const FrameObs& b,
-                                  const std::unordered_map<int, Vec3>* static_ids) {
+                                  const std::unordered_map<int, Vec3>* static_ids, double dist_thresh) {
   if (static_ids) {
     int n = 0;
     for (int j : b.pid) n += a.point(j) && static_ids->count(j);
@@ -361,7 +361,7 @@ std::optional<Pose> relative_pose(const Camera& c, const FrameObs& a, const Fram
   cv::Mat inl, R, t;
   const cv::Mat E = cv::findEssentialMat(x1, x2, I, cv::RANSAC, 0.999, 1.0 / c.fx, 1000, inl);
   if (E.rows != 3 || E.cols != 3) return std::nullopt;
-  cv::recoverPose(E, x1, x2, I, R, t, inl);
+  cv::recoverPose(E, x1, x2, I, R, t, dist_thresh, inl);
   std::vector<Vec2> v1, v2;
   for (size_t i = 0; i < x1.size(); ++i)
     if (inl.at<uchar>(i)) v1.emplace_back(x1[i].x, x1[i].y), v2.emplace_back(x2[i].x, x2[i].y);

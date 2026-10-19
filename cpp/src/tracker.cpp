@@ -94,13 +94,17 @@ std::vector<int> VOTracker::add(FrameObs o, const std::optional<Pose>& r, const 
   kfs = {0, I};
   update_map(I);
   bool ok = int(map_p.size()) >= prm.init_min_points;
+  if (!ok) init_note = "only " + std::to_string(map_p.size()) + " map points";
   std::vector<int> done{0, I};
   for (int f = 1; f < I && ok; ++f) {
     ok = track(f);
+    if (!ok) init_note = "frame " + std::to_string(f) + ": " + fail_reason;
     done.push_back(f);
   }
   if (!ok) {  // 맵이 빈약하거나 중간 프레임 추적 실패 -> 이번 초기화는 버리고 다음 프레임에서 다시
+    const std::string note = init_note;
     reset_init();
+    init_note = note;
     return {};
   }
   return done;

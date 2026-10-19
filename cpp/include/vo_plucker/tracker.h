@@ -78,6 +78,7 @@ class VOTracker {
   int n_map6dof = 0;     // parallax가 작아서 맵 기준 6-DoF로 추정한 프레임 수
   int failed_at = -1;  // tracking 실패 프레임 (-1 = 정상), 실패 후에는 추적 안 함 (relocalization 없음)
   std::string fail_reason;
+  std::string init_note;  // 마지막 초기화 시도가 거절된 이유
   int line_rejected = 0;
 
  private:

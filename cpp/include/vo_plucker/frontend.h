@@ -46,12 +46,18 @@ class Frontend {
   int next_p_ = 0, next_l_ = 0;
 };
 
-// frame 0 / init_frame point observations -> (R, t)
-Pose robust_init(const Camera& c, const FrameObs& o0, const FrameObs& oI);
+// 2D-2D에서 recoverPose의 distanceThresh: 이 값(|t|=1 기준) 넘게 먼 점은 인라이어에서 빠짐. OpenCV 기본값 50은
+// baseline이 짧으면 (30 fps 핸드헬드: 프레임당 ~2 cm) 몇 m 밖의 점을 다 버림 -> 큰 값 = cheirality만 검사.
+// 50 = Python frontend와 동일 (일치 테스트용)
+constexpr double kRecoverPoseDist = 1e6;
+
+// frame 0 / init frame point observations -> (R, t)
+Pose robust_init(const Camera& c, const FrameObs& o0, const FrameObs& oI, double dist_thresh = kRecoverPoseDist);
 // consecutive frames a (k-1), b (k) -> (R_rel, t direction), nullopt if too few matches.
 // static_ids를 주면 그 id(맵 점 = 검증된 정적 배경)의 트랙만 사용 (30개 미만이면 전체): 움직이는 물체가 많을 때
 // RANSAC이 물체의 움직임을 카메라 움직임으로 잡는 걸 막음
 std::optional<Pose> relative_pose(const Camera& c, const FrameObs& a, const FrameObs& b,
-                                  const std::unordered_map<int, Vec3>* static_ids = nullptr);
+                                  const std::unordered_map<int, Vec3>* static_ids = nullptr,
+                                  double dist_thresh = kRecoverPoseDist);
 
 }  // namespace vp

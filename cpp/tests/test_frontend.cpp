@@ -29,9 +29,9 @@ int main(int argc, char** argv) {
     cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
     obs.push_back(front.step(gray));
     const FrameObs &c = obs.back(), &p = ref[k].o;
-    const std::optional<Pose> rel = k ? relative_pose(cam, obs[k - 1], c) : std::nullopt;
+    const std::optional<Pose> rel = k ? relative_pose(cam, obs[k - 1], c, nullptr, 50.0) : std::nullopt;  // 50 = Python
     std::optional<Pose> init;
-    if (int(k) == init_frame) init = robust_init(cam, obs[0], c);
+    if (int(k) == init_frame) init = robust_init(cam, obs[0], c, 50.0);
 
     bool same = c.pid == p.pid && c.lid == p.lid && bool(rel) == bool(ref[k].rel);
     if (same) {
