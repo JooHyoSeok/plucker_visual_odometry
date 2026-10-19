@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import cv2
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))      # vo_plucker/
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python"))      # vo_plucker/python
 import vo_plucker as v
 import frontend as fe
 

@@ -1,5 +1,5 @@
 """
-KITTI 06 실데이터 VO 결과를 영상으로 -> kitti06_vo.mp4  (먼저 python3 vo_kitti.py 실행)
+배치 파이프라인 결과를 영상으로 -> batch_vo.mp4  (먼저 python3 kitti_batch.py 실행)
   위   : 실제 카메라 영상. 노랑 점 = KLT 트랙, 청록 = 관측(LSD) 선분,
          자홍 = 추정 포즈로 다시 투영한 맵의 Plücker 직선, 초록 o = 다시 투영한 맵 점(일부)
   아래 왼쪽 : top view — GT / VO(points+lines) / loop closure + Sim(3) PGO (온라인: 루프가 잡힐 때마다 보정)
@@ -11,10 +11,10 @@ import sys
 import numpy as np
 import cv2
 
-import vo_kitti as vk
+import kitti_batch as vk
 import vo_plucker as v
 
-OUT = "kitti06_vo.mp4"
+OUT = "batch_vo.mp4"
 FPS = 20
 CW = 1280
 IMG_H = int(round(vk.H * CW / vk.W))       # 386
@@ -39,7 +39,7 @@ def clip_line(l):
 
 
 def main():
-    d = pickle.load(open("kitti06_run_ba.pkl" if "--ba" in sys.argv else "kitti06_run.pkl", "rb"))
+    d = pickle.load(open("batch_run_ba.pkl" if "--ba" in sys.argv else "batch_run.pkl", "rb"))
     obs, C_gt, res = d["obs"], d["C_gt"], d["results"]
     n = len(obs)
 
@@ -70,7 +70,7 @@ def main():
         return np.c_[ox + sc * (xz[:, 0] - lo[0]), oy + tv_h - sc * (xz[:, 1] - lo[1])].astype(np.int32)
 
     cap = cv2.VideoCapture(vk.VIDEO)
-    vw = cv2.VideoWriter("tmp_kitti.avi", cv2.VideoWriter_fourcc(*"MJPG"), FPS, (CW, IMG_H + PANEL_H))
+    vw = cv2.VideoWriter("tmp_batch.avi", cv2.VideoWriter_fourcc(*"MJPG"), FPS, (CW, IMG_H + PANEL_H))
     hist_l = res["points + lines"]["hist"]
     font = cv2.FONT_HERSHEY_SIMPLEX
 
@@ -153,10 +153,10 @@ def main():
 
         vw.write(np.vstack([img, panel]))
         if k in (330, 1000):
-            cv2.imwrite(f"kitti06_vo_frame{k}.png", np.vstack([img, panel]))
+            cv2.imwrite(f"batch_vo_frame{k}.png", np.vstack([img, panel]))
     vw.release()
     import subprocess
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", "tmp_kitti.avi", "-c:v", "libx264",
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", "tmp_batch.avi", "-c:v", "libx264",
                     "-pix_fmt", "yuv420p", "-crf", "26", OUT], check=True)
     print("saved", OUT)
 

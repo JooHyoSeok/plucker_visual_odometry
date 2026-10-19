@@ -6,7 +6,7 @@ Online monocular SLAM with points + Plücker lines: feed one image, get one pose
   keyframe    : ORB + thumbnail -> loop check on the previous keyframe -> Sim(3) PGO -> map correction
   feedback    : the PGO result is written back into poses, map points, map lines, loop 3D points and old
                 loop edges, so the next frame is tracked against the corrected map (--no-feedback: PGO result
-                is only reported, VO keeps its own map = same as the batch vo_kitti.py pipeline)
+                is only reported, VO keeps its own map = same as the batch kitti_batch.py pipeline)
 
 library:
     slam = OnlineSLAM(fx, fy, cx, cy, W, H)

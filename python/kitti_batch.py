@@ -15,8 +15,8 @@ Backend (vo_plucker.run_vo, "decoupled" mode)
              -> 6-DoF map-only PnP had a systematic ~0.09 deg/frame yaw bias on KITTI (no BA), this fixes it
   mapping  : N-view triangulation of points and lines (Plücker from stacked back-projected planes)
 
-usage:  python3 vo_kitti.py [n_frames] [--ba] [--video PATH] [--gt PATH] [--calib fx,fy,cx,cy]
-        python3 make_video_kitti.py [같은 --video ... 인자]
+usage:  python3 kitti_batch.py [n_frames] [--ba] [--video PATH] [--gt PATH] [--calib fx,fy,cx,cy]
+        python3 kitti_batch_video.py [같은 --video ... 인자]
 """
 import sys
 import time
@@ -124,7 +124,7 @@ if __name__ == "__main__":
               f"({100 * rmse(err_lc) / path_len:.1f}%) | loops {len(lcr['loops'])} | "
               f"VO {t1 - t0:.0f}s, loop {time.time() - t1:.0f}s" + ("" if st["failed_at"] is None else f" | FAILED at {n_ok}"))
 
-    out = "kitti06_run_ba.pkl" if USE_BA else "kitti06_run.pkl"
+    out = "batch_run_ba.pkl" if USE_BA else "batch_run.pkl"
     with open(out, "wb") as f:
         pickle.dump(dict(obs=obs, C_gt=C_gt, results=results, kfs=kfs, use_ba=USE_BA), f)
 
@@ -147,6 +147,6 @@ if __name__ == "__main__":
     ax[1].set(title="position error (origin-anchored)", xlabel="frame", ylabel="[m]")
     ax[1].legend(fontsize=8)
     plt.tight_layout()
-    png = "kitti06_result_ba.png" if USE_BA else "kitti06_result.png"
+    png = "batch_result_ba.png" if USE_BA else "batch_result.png"
     plt.savefig(png, dpi=120)
     print(f"saved {png}, {out}")

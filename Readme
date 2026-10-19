@@ -3,15 +3,17 @@
 ## Files
 | file | role |
 |---|---|
-| `vo_plucker.py` | geometry core: Plücker lines, triangulation, pose estimation, frame-by-frame `VOTracker` (`run_vo` = batch wrapper; also a synthetic-corridor demo when run directly) |
-| `frontend.py` | real-data frontend, one frame at a time: KLT points + LSD lines, 2D-2D init / relative pose, camera setup |
-| `slam_online.py` | **online SLAM**: `OnlineSLAM.track(img) -> pose`; loop closure + Sim(3) PGO corrects the map and tracking continues on it; live view / video |
-| `vo_kitti.py` | batch pipeline (offline): frontend over all frames, VO, loop closure + Sim(3) PGO, evaluation |
-| `local_ba.py` | sliding-window BA (points + lines in orthonormal 4-DoF), enabled with `--ba` |
-| `loop_closure.py` | loop detection (thumbnail shortlist + ORB + F-RANSAC + 3D-3D Sim(3) RANSAC) and Sim(3) pose graph |
-| `make_video_kitti.py` | renders the result video from the run file |
+| `cpp/` | C++ port (Eigen + OpenCV, Pangolin viewer): `cpp/build/run_vo` |
+| `results/` | result images / videos |
+| `python/vo_plucker.py` | geometry core: Plücker lines, triangulation, pose estimation, frame-by-frame `VOTracker` (`run_vo` = batch wrapper; also a synthetic-corridor demo when run directly) |
+| `python/frontend.py` | real-data frontend, one frame at a time: KLT points + LSD lines, 2D-2D init / relative pose, camera setup |
+| `python/slam_online.py` | **online SLAM**: `OnlineSLAM.track(img) -> pose`; loop closure + Sim(3) PGO corrects the map and tracking continues on it; live view / video |
+| `python/kitti_batch.py` | batch pipeline (offline): frontend over all frames, VO, loop closure + Sim(3) PGO, evaluation |
+| `python/local_ba.py` | sliding-window BA (points + lines in orthonormal 4-DoF), enabled with `--ba` |
+| `python/loop_closure.py` | loop detection (thumbnail shortlist + ORB + F-RANSAC + 3D-3D Sim(3) RANSAC) and Sim(3) pose graph |
+| `python/kitti_batch_video.py` | renders the result video from the run file |
 
-All `.py` files must be in the same folder.
+All Python modules live in `python/` and import each other (run them as `python3 python/<file>.py`).
 
 ## Setup
 ```bash
@@ -40,9 +42,9 @@ for img in images:                               # BGR or gray, rectified, one a
 ```
 ```bash
 # video file, image pattern, or camera index (--video 0); --gt only for evaluation / plot
-python3 slam_online.py --video dataset/sequences/06/image_0/%06d.png --gt dataset/poses/06.txt \
-                       --calib 707.0912,707.0912,601.8873,183.1104 --out online06.mp4   # --show: live window
-python3 slam_online.py --selftest                # map-correction check
+python3 python/slam_online.py --video dataset/sequences/06/image_0/%06d.png --gt dataset/poses/06.txt \
+                              --calib 707.0912,707.0912,601.8873,183.1104 --out online06.mp4   # --show: live window
+python3 python/slam_online.py --selftest          # map-correction check
 ```
 Options: first positional number = first N frames, `--ba`, `--no-lines`, `--no-feedback` (loop result only reported,
 VO not corrected = same result as the batch pipeline). Writes `online_traj.txt` (KITTI format, T_wc per frame).
@@ -50,21 +52,21 @@ VO not corrected = same result as the batch pipeline). Writes `online_traj.txt` 
 ## Run (batch)
 ```bash
 # default = data_dl/pyslam/data/videos/kitti06 (video.mp4 + 06.txt)
-python3 vo_kitti.py
-python3 make_video_kitti.py
+python3 python/kitti_batch.py
+python3 python/kitti_batch_video.py
 
 # original KITTI images (image sequence pattern works directly)
-python3 vo_kitti.py --video dataset/sequences/06/image_0/%06d.png \
-                    --gt dataset/poses/06.txt \
-                    --calib 707.0912,707.0912,601.8873,183.1104
-python3 make_video_kitti.py --video dataset/sequences/06/image_0/%06d.png --gt dataset/poses/06.txt
+python3 python/kitti_batch.py --video dataset/sequences/06/image_0/%06d.png \
+                              --gt dataset/poses/06.txt \
+                              --calib 707.0912,707.0912,601.8873,183.1104
+python3 python/kitti_batch_video.py --video dataset/sequences/06/image_0/%06d.png --gt dataset/poses/06.txt
 ```
-Options for `vo_kitti.py`
-- first positional number: use only the first N frames (e.g. `python3 vo_kitti.py 300`)
-- `--ba`: turn on local BA (outputs `kitti06_run_ba.pkl` / `kitti06_result_ba.png`; pass `--ba` to the video script too)
+Options for `kitti_batch.py`
+- first positional number: use only the first N frames (e.g. `python3 python/kitti_batch.py 300`)
+- `--ba`: turn on local BA (outputs `batch_run_ba.pkl` / `batch_result_ba.png`; pass `--ba` to the video script too)
 - `--calib fx,fy,cx,cy`: KITTI 00-02 `718.856,718.856,607.1928,185.2157`, 03 `721.5377,721.5377,609.5593,172.854`, 04-12 `707.0912,707.0912,601.8873,183.1104`
 
-Outputs: `kitti06_result.png` (trajectory + error), `kitti06_run.pkl` (all results), `kitti06_vo.mp4` (video).
+Outputs (current directory): `batch_result.png` (trajectory + error), `batch_run.pkl` (all results), `batch_vo.mp4` (video).
 Runtime for the full 1101-frame sequence: about 6-8 min (+ about 10 min more with `--ba`).
 
 ## Notes

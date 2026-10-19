@@ -1,5 +1,5 @@
 """
-Real-data frontend for vo_plucker, one frame at a time (shared by vo_kitti.py batch and slam_online.py).
+Real-data frontend for vo_plucker, one frame at a time (shared by kitti_batch.py and slam_online.py).
 
   points : Shi-Tomasi + KLT (forward-backward check) + fundamental-matrix RANSAC
   lines  : LSD detection; each line is tracked by KLT on N_SAMPLES samples along it, refit, and then
