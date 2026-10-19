@@ -332,11 +332,26 @@ Pose robust_init(const Camera& c, const FrameObs& o0, const FrameObs& oI) {
   return refine_relative_pose(p, x1, x2, c.fx);
 }
 
-std::optional<Pose> relative_pose(const Camera& c, const FrameObs& a, const FrameObs& b) {
+void Frontend::drop(const std::vector<int>& ids) {
+  if (ids.empty()) return;
+  const std::unordered_set<int> bad(ids.begin(), ids.end());
+  size_t n = 0;
+  for (size_t i = 0; i < pid.size(); ++i)
+    if (!bad.count(pid[i])) pts[n] = pts[i], pid[n] = pid[i], ++n;
+  pts.resize(n), pid.resize(n);
+}
+
+std::optional<Pose> relative_pose(const Camera& c, const FrameObs& a, const FrameObs& b,
+                                  const std::unordered_map<int, Vec3>* static_ids) {
+  if (static_ids) {
+    int n = 0;
+    for (int j : b.pid) n += a.point(j) && static_ids->count(j);
+    if (n < 30) static_ids = nullptr;
+  }
   std::vector<cv::Point2d> x1, x2;
   for (size_t i = 0; i < b.pid.size(); ++i) {
     const Vec2* pa = a.point(b.pid[i]);
-    if (!pa) continue;
+    if (!pa || (static_ids && !static_ids->count(b.pid[i]))) continue;
     const Vec2 u = (c.Kinv * Vec3((*pa)(0), (*pa)(1), 1.0)).head<2>();
     const Vec2 w = (c.Kinv * Vec3(b.uv[i](0), b.uv[i](1), 1.0)).head<2>();
     x1.emplace_back(u(0), u(1)), x2.emplace_back(w(0), w(1));

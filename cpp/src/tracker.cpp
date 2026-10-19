@@ -36,6 +36,44 @@ std::optional<Pose> VOTracker::predict() const {
   return const_velocity(poses[k - 2], poses[k - 1]);
 }
 
+std::vector<int> VOTracker::inconsistent_tracks(double px) const {
+  const int k = int(obs.size()) - 1;
+  std::vector<int> out;
+  if (k < 1 || !has_pose[k] || !has_pose[k - 1]) return out;
+  const Pose &a = poses[k - 1], &b = poses[k];
+  const Mat3 Rr = b.R * a.R.transpose();
+  const Vec3 tr = b.t - Rr * a.t;
+  std::vector<double> depth;
+  for (size_t i = 0; i < obs[k].pid.size(); ++i)
+    if (const auto it = map_p.find(obs[k].pid[i]); it != map_p.end()) depth.push_back((b.R * it->second + b.t)(2));
+  if (depth.size() < 10) return out;
+  std::nth_element(depth.begin(), depth.begin() + depth.size() / 2, depth.end());
+  const bool still = (center(b) - center(a)).norm() / depth[depth.size() / 2] < 0.002;
+  const Mat3 H = cam.K * Rr * cam.Kinv;  // 순수 회전 homography
+  std::vector<int> ids;
+  std::vector<Vec2> x1, x2;
+  for (size_t i = 0; i < obs[k].pid.size(); ++i) {
+    const int j = obs[k].pid[i];
+    const Vec2* u0 = obs[k - 1].point(j);
+    if (!u0 || map_p.count(j)) continue;
+    const Vec2& u1 = obs[k].uv[i];
+    if (still) {
+      const Vec3 q = H * Vec3((*u0)(0), (*u0)(1), 1.0);
+      if ((q.head<2>() / q(2) - u1).norm() > px) out.push_back(j);
+    } else {
+      ids.push_back(j);
+      x1.push_back((cam.Kinv * Vec3((*u0)(0), (*u0)(1), 1.0)).head<2>());
+      x2.push_back((cam.Kinv * Vec3(u1(0), u1(1), 1.0)).head<2>());
+    }
+  }
+  if (!still && !ids.empty()) {
+    const VecX e = sampson(Rr, tr, x1, x2, cam.fx);
+    for (size_t i = 0; i < ids.size(); ++i)
+      if (std::abs(e(i)) > px) out.push_back(ids[i]);
+  }
+  return out;
+}
+
 std::vector<int> VOTracker::add(FrameObs o, const std::optional<Pose>& r, const std::optional<Pose>& init) {
   const int k = obs.size();
   o.index();

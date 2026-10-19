@@ -1,6 +1,6 @@
 // C++ monocular VO (points + Plücker lines): images in one by one -> pose out. No loop closure yet.
 // usage: run_vo [n_frames] --video PATH|CAM_INDEX [--gt PATH] [--calib fx,fy,cx,cy] [--no-lines] [--traj OUT.txt]
-//               [--init-frame N] [--no-reattach] [--no-viewer] [--snapshot OUT.png]
+//               [--init-frame N] [--no-reattach] [--rel-static] [--drop-dynamic] [--no-viewer] [--snapshot OUT.png]
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -79,7 +79,7 @@ int main(int argc, char** argv) {
   if (!src) {
     std::fprintf(stderr,
                  "usage: %s [n_frames] --video PATH|CAM_INDEX [--gt PATH] [--calib fx,fy,cx,cy] [--no-lines] "
-                 "[--traj OUT.txt] [--init-frame N] [--no-reattach] [--no-viewer] [--snapshot OUT.png]\n",
+                 "[--traj OUT.txt] [--init-frame N] [--no-reattach] [--rel-static] [--drop-dynamic] [--no-viewer] [--snapshot OUT.png]\n",
                  argv[0]);
     return 2;
   }
@@ -115,8 +115,10 @@ int main(int argc, char** argv) {
   }
 #endif
 
-  const bool no_reattach = flag(argc, argv, "--no-reattach");
-  long n_reattach = 0;
+  // 실험용 (기본 꺼짐, KITTI 06/07에서 이득 불분명): 2D-2D를 맵 점 트랙만으로 / 자기운동에 안 맞는 트랙 제거
+  const bool no_reattach = flag(argc, argv, "--no-reattach"), rel_all = !flag(argc, argv, "--rel-static"),
+             keep_dynamic = !flag(argc, argv, "--drop-dynamic");
+  long n_reattach = 0, n_dynamic = 0;
   double t_read = 0, t_front = 0, t_rel = 0, t_vo = 0, t_view = 0;
   const auto t_start = Clock::now();
   int k = 0;
@@ -132,12 +134,16 @@ int main(int argc, char** argv) {
     if (const auto pred = vo.predict(); pred && !no_reattach) n_reattach += front.reattach(cam, vo, *pred, o);
     t_front += ms_since(t0);
     t0 = Clock::now();
-    const std::optional<Pose> rel = k ? relative_pose(cam, vo.obs.back(), o) : std::nullopt;
+    const std::optional<Pose> rel = k ? relative_pose(cam, vo.obs.back(), o, rel_all ? nullptr : &vo.map_p) : std::nullopt;
     std::optional<Pose> init;
     if (k == prm.init_frame) init = robust_init(cam, vo.obs[0], o);
     t_rel += ms_since(t0);
     t0 = Clock::now();
     vo.add(std::move(o), rel, init);
+    if (!keep_dynamic) {
+      const std::vector<int> dyn = vo.inconsistent_tracks(3.0);
+      front.drop(dyn), n_dynamic += dyn.size();
+    }
     t_vo += ms_since(t0);
 #ifdef VP_WITH_VIEWER
     if (viewer) {
@@ -159,7 +165,8 @@ int main(int argc, char** argv) {
               vo.failed_at >= 0 ? (" | FAILED at " + std::to_string(vo.failed_at) + ": " + vo.fail_reason).c_str() : "",
               k / (total / 1000),
               total / k);
-  std::printf("  map points re-attached after track loss: %ld (%.1f / frame)\n", n_reattach, double(n_reattach) / k);
+  std::printf("  map points re-attached after track loss: %ld (%.1f / frame) | dynamic tracks dropped: %ld (%.1f / frame)\n",
+              n_reattach, double(n_reattach) / k, n_dynamic, double(n_dynamic) / k);
   std::printf("  per frame: read %.1f | frontend %.1f (LSD %.1f) | 2D-2D %.1f | tracker %.1f | viewer %.1f ms\n",
               t_read / k, t_front / k, front.lsd_ms / k, t_rel / k, t_vo / k, t_view / k);
 

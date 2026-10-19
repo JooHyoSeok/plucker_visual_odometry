@@ -44,6 +44,9 @@ class VOTracker {
   std::vector<int> add(FrameObs o, const std::optional<Pose>& rel, const std::optional<Pose>& init);
   // 다음 프레임(obs.size())의 constant-velocity 예측 포즈. 직전 두 프레임 포즈가 없으면 nullopt
   std::optional<Pose> predict() const;
+  // 마지막 프레임 k: k-1 -> k 추정 운동에 안 맞는 (맵에 없는) 점 트랙 id = 움직이는 물체 / 잘못된 트랙.
+  // 이동이 거의 없으면 (|ΔC| / 맵 점 중앙 깊이 < 0.002) 회전만으로 예측한 위치, 아니면 Sampson 오차로 판정 [px]
+  std::vector<int> inconsistent_tracks(double px) const;
 
   // state: 바깥(local BA, 루프 보정)에서 제자리 수정 가능 -> 다음 프레임 추적에 그대로 반영
   Camera cam;

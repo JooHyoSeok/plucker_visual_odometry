@@ -29,6 +29,7 @@ class Frontend {
   // -> FB 검사 + 투영 위치 근처면 원래 id로 o와 추적 목록에 추가. 같은 자리의 맵에 없는 새 트랙은 원래 id로 합침
   // step() 직후, vo.add() 전에 호출. 반환: 붙인 점 수
   int reattach(const Camera& cam, const VOTracker& vo, const Pose& pred, FrameObs& o);
+  void drop(const std::vector<int>& ids);  // 점 트랙 제거 (동적 물체 등)
 
   FrontendParams prm;
   std::vector<cv::Point2f> pts;  // current point tracks
@@ -47,7 +48,10 @@ class Frontend {
 
 // frame 0 / init_frame point observations -> (R, t)
 Pose robust_init(const Camera& c, const FrameObs& o0, const FrameObs& oI);
-// consecutive frames a (k-1), b (k) -> (R_rel, t direction), nullopt if too few matches
-std::optional<Pose> relative_pose(const Camera& c, const FrameObs& a, const FrameObs& b);
+// consecutive frames a (k-1), b (k) -> (R_rel, t direction), nullopt if too few matches.
+// static_ids를 주면 그 id(맵 점 = 검증된 정적 배경)의 트랙만 사용 (30개 미만이면 전체): 움직이는 물체가 많을 때
+// RANSAC이 물체의 움직임을 카메라 움직임으로 잡는 걸 막음
+std::optional<Pose> relative_pose(const Camera& c, const FrameObs& a, const FrameObs& b,
+                                  const std::unordered_map<int, Vec3>* static_ids = nullptr);
 
 }  // namespace vp
