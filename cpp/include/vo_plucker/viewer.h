@@ -24,6 +24,7 @@ struct RunOptions {  // 시작 화면에서 고르는 것 (기본값 = 명령행
   bool loop = false;
   std::string pr = "thumb", ver = "orb";  // --loop-pr / --loop-ver 와 같은 이름
   bool lines = true;
+  bool depth_prior = false;  // --depth-prior da3
 };
 
 class Viewer {

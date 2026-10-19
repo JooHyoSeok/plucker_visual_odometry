@@ -1,5 +1,7 @@
 #include "vo_plucker/optimizer.h"
 
+#include "vo_plucker/g2o_line.h"
+
 #include <g2o/core/base_unary_edge.h>
 #include <g2o/core/block_solver.h>
 #include <g2o/core/optimization_algorithm_levenberg.h>
@@ -168,11 +170,31 @@ Pose motion_only_ba(const Camera& c, const Pose& init, const MapObs& m, int iter
   return Pose{T.rotation().toRotationMatrix(), T.translation()};
 }
 
-LocalBAStats local_ba(VOTracker& vo, int window, int max_fixed) {
-  const auto t0 = std::chrono::steady_clock::now();
+struct LocalBAProblem {
+  g2o::SparseOptimizer opt;
+  std::vector<int> free;
+  std::unordered_map<int, g2o::VertexSE3Expmap*> vk;
+  std::unordered_map<int, g2o::SE3Quat> pose0;  // build 때 포즈 / 점 (BA 전 오차 계산용)
+  std::unordered_map<int, Vec3> X0;
+  struct Obs { g2o::EdgeSE3ProjectXYZ* e; int j; };
+  struct LObs { EdgeLineProjection* e; int j; };
+  std::vector<Obs> edges;
+  std::vector<LObs> ledges;
+  std::unordered_map<int, g2o::VertexPointXYZ*> vp;
+  std::unordered_map<int, VertexLineOrth*> vl;
   LocalBAStats st;
+  int version = 0;  // build 때 vo.map_version (루프 보정이 들어오면 apply 에서 버림)
+};
+void LocalBAProblemDeleter::operator()(LocalBAProblem* p) const { delete p; }
+
+static constexpr double kBaChi2 = 5.991;  // 2 DoF, 95% (ORB-SLAM), 1 px 잡음 가정
+
+LocalBAPtr local_ba_build(const VOTracker& vo, int window, int max_fixed, bool lines, bool mature_only) {
+  const auto t0 = std::chrono::steady_clock::now();
   const std::vector<int>& kfs = vo.kfs;
-  if (kfs.size() < 3) return st;
+  if (kfs.size() < 3) return nullptr;
+  LocalBAPtr P(new LocalBAProblem);
+  P->version = vo.map_version;
   const int n_win = std::min<int>(window, kfs.size());
   std::vector<int> free(kfs.end() - n_win, kfs.end());
 
@@ -180,7 +202,7 @@ LocalBAStats local_ba(VOTracker& vo, int window, int max_fixed) {
   std::unordered_set<int> pts;
   for (int f : free)
     for (int j : vo.obs[f].pid)
-      if (vo.map_p.count(j)) pts.insert(j);
+      if (vo.map_p.count(j) && (!mature_only || vo.mature_p.count(j))) pts.insert(j);
   // 고정 키프레임: 창 앞쪽에서 거꾸로, 같은 점을 보는 것
   std::vector<int> fixed;
   for (int i = int(kfs.size()) - n_win - 1; i >= 0 && int(fixed.size()) < max_fixed; --i) {
@@ -192,16 +214,24 @@ LocalBAStats local_ba(VOTracker& vo, int window, int max_fixed) {
       }
   }
   while (fixed.size() < 2 && free.size() > 2) fixed.push_back(free.front()), free.erase(free.begin());  // gauge
+  P->free = free;
 
-  using Block = g2o::BlockSolver_6_3;
-  g2o::SparseOptimizer opt;
-  opt.setAlgorithm(new g2o::OptimizationAlgorithmLevenberg(
-      std::make_unique<Block>(std::make_unique<g2o::LinearSolverEigen<Block::PoseMatrixType>>())));
-  std::unordered_map<int, g2o::VertexSE3Expmap*> vk;
+  g2o::SparseOptimizer& opt = P->opt;
+  if (lines) {  // 정점 차원이 6 (포즈) / 3 (점) / 4 (라인) 로 섞임 -> 동적 블록
+    using Block = g2o::BlockSolverX;
+    opt.setAlgorithm(new g2o::OptimizationAlgorithmLevenberg(
+        std::make_unique<Block>(std::make_unique<g2o::LinearSolverEigen<Block::PoseMatrixType>>())));
+  } else {
+    using Block = g2o::BlockSolver_6_3;
+    opt.setAlgorithm(new g2o::OptimizationAlgorithmLevenberg(
+        std::make_unique<Block>(std::make_unique<g2o::LinearSolverEigen<Block::PoseMatrixType>>())));
+  }
+  auto& vk = P->vk;
   auto add_kf = [&](int f, bool fix) {
     auto* v = new g2o::VertexSE3Expmap();
     v->setId(vk.size());
-    v->setEstimate(g2o::SE3Quat(vo.poses[f].R, vo.poses[f].t));
+    P->pose0[f] = g2o::SE3Quat(vo.poses[f].R, vo.poses[f].t);
+    v->setEstimate(P->pose0[f]);
     v->setFixed(fix);
     opt.addVertex(v);
     vk[f] = v;
@@ -209,10 +239,7 @@ LocalBAStats local_ba(VOTracker& vo, int window, int max_fixed) {
   for (int f : free) add_kf(f, false);
   for (int f : fixed) add_kf(f, true);
 
-  const double chi2_th = 5.991, huber = std::sqrt(chi2_th);  // 2 DoF, 95% (ORB-SLAM), 1 px 잡음 가정
-  struct Obs { g2o::EdgeSE3ProjectXYZ* e; int j; };
-  std::vector<Obs> edges;
-  std::unordered_map<int, g2o::VertexPointXYZ*> vp;
+  const double huber = std::sqrt(kBaChi2);
   int next_id = vk.size();
   for (int j : pts) {
     std::vector<std::pair<int, const Vec2*>> seen;  // (키프레임, 관측)
@@ -221,10 +248,11 @@ LocalBAStats local_ba(VOTracker& vo, int window, int max_fixed) {
     if (seen.size() < 2) continue;
     auto* p = new g2o::VertexPointXYZ();
     p->setId(next_id++);
-    p->setEstimate(vo.map_p[j]);
+    P->X0[j] = vo.map_p.at(j);
+    p->setEstimate(P->X0[j]);
     p->setMarginalized(true);
     opt.addVertex(p);
-    vp[j] = p;
+    P->vp[j] = p;
     for (auto& [f, u] : seen) {
       auto* e = new g2o::EdgeSE3ProjectXYZ();
       e->setVertex(0, p);
@@ -236,51 +264,106 @@ LocalBAStats local_ba(VOTracker& vo, int window, int max_fixed) {
       e->setRobustKernel(rk);
       e->fx = vo.cam.fx, e->fy = vo.cam.fy, e->cx = vo.cam.cx, e->cy = vo.cam.cy;
       opt.addEdge(e);
-      edges.push_back({e, j});
+      P->edges.push_back({e, j});
     }
   }
-  st.kfs = free.size(), st.fixed = fixed.size(), st.points = vp.size(), st.edges = edges.size();
-  if (vp.empty()) return st;
+  // 라인: 창 키프레임이 보고, 창 + 고정 키프레임에서 2번 이상 관측된 맵 라인
+  if (lines) {
+    std::unordered_set<int> ls;
+    for (int f : free)
+      for (int j : vo.obs[f].lid)
+        if (vo.map_l.count(j)) ls.insert(j);
+    for (int j : ls) {
+      std::vector<std::pair<int, const Vec4*>> seen;
+      for (auto& [f, v] : vk)
+        if (const Vec4* sg = vo.obs[f].line(j)) seen.emplace_back(f, sg);
+      if (seen.size() < 2) continue;
+      // 퇴화 라인 제외: 창 안 첫 / 마지막 관측의 역투영 평면 각도가 작으면 (진행 방향을 향하는 라인 등)
+      // 라인 위치가 거의 안 정해져서 포즈 회전을 끌고 감 (06: 라인 BA 만 켜면 마지막 방향 오차 1.3 -> 21 deg)
+      const auto [fa, fb] = std::minmax_element(seen.begin(), seen.end());
+      if (plane_angle_deg(vo.cam, vo.poses[fa->first], *fa->second, vo.poses[fb->first], *fb->second) < vo.prm.mature_deg)
+        continue;
+      auto* l = new VertexLineOrth();
+      l->setId(next_id++);
+      l->setEstimate(to_orth(vo.map_l.at(j)));
+      l->setMarginalized(true);
+      opt.addVertex(l);
+      P->vl[j] = l;
+      for (auto& [f, sg] : seen) {
+        auto* e = new EdgeLineProjection();
+        e->setVertex(0, l);
+        e->setVertex(1, vk[f]);
+        e->setMeasurement(*sg);
+        e->setInformation(Eigen::Matrix2d::Identity());
+        auto* rk = new g2o::RobustKernelHuber();
+        rk->setDelta(huber);
+        e->setRobustKernel(rk);
+        e->KL = vo.cam.KL;
+        opt.addEdge(e);
+        P->ledges.push_back({e, j});
+      }
+    }
+  }
+  P->st.kfs = free.size(), P->st.fixed = fixed.size(), P->st.points = P->vp.size(), P->st.edges = P->edges.size();
+  P->st.lines = P->vl.size();
+  P->st.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  if (P->vp.empty()) return nullptr;
+  return P;
+}
 
-  // 재투영 오차 RMS [px] (2차에서 쓰는 관측 = level 0, chi2는 Huber 전 값)
-  auto rms = [&]() {
+void local_ba_solve(LocalBAProblem& P) {
+  const auto t0 = std::chrono::steady_clock::now();
+  auto rms = [&]() {  // 재투영 오차 RMS [px] (2차에서 쓰는 관측 = level 0, chi2는 Huber 전 값)
     double s = 0;
     int n = 0;
-    for (auto& o : edges)
+    for (auto& o : P.edges)
       if (o.e->level() == 0) o.e->computeError(), s += o.e->chi2(), ++n;
     return n ? std::sqrt(s / n) : 0.0;
   };
-  opt.initializeOptimization();
-  opt.optimize(5);
-  for (auto& o : edges)  // 1차 후 큰 오차 / 카메라 뒤 관측은 빼고 Huber 없이 다시
-    if (o.e->chi2() > chi2_th || !o.e->isDepthPositive()) o.e->setLevel(1);
+  P.opt.initializeOptimization();
+  P.opt.optimize(5);
+  for (auto& o : P.edges)  // 1차 후 큰 오차 / 카메라 뒤 관측은 빼고 Huber 없이 다시
+    if (o.e->chi2() > kBaChi2 || !o.e->isDepthPositive()) o.e->setLevel(1);
     else o.e->setRobustKernel(nullptr);
-  {  // BA 전 오차: 같은 (인라이어) 관측을 원래 포즈/점으로 계산하고 1차 결과로 되돌림
+  for (auto& o : P.ledges)  // 라인도 같은 기준 (끝점 거리 2개 = 2 DoF)
+    if (o.e->computeError(), o.e->chi2() > kBaChi2) o.e->setLevel(1);
+    else o.e->setRobustKernel(nullptr);
+  {  // BA 전 오차: 같은 (인라이어) 관측을 build 때 포즈/점으로 계산하고 1차 결과로 되돌림
     std::unordered_map<int, g2o::SE3Quat> pk;
     std::unordered_map<int, Vec3> pp;
-    for (auto& [f, v] : vk) pk[f] = v->estimate(), v->setEstimate(g2o::SE3Quat(vo.poses[f].R, vo.poses[f].t));
-    for (auto& [j, p] : vp) pp[j] = p->estimate(), p->setEstimate(vo.map_p[j]);
-    st.rms_before = rms();
-    for (auto& [f, v] : vk) v->setEstimate(pk[f]);
-    for (auto& [j, p] : vp) p->setEstimate(pp[j]);
+    for (auto& [f, v] : P.vk) pk[f] = v->estimate(), v->setEstimate(P.pose0[f]);
+    for (auto& [j, p] : P.vp) pp[j] = p->estimate(), p->setEstimate(P.X0[j]);
+    P.st.rms_before = rms();
+    for (auto& [f, v] : P.vk) v->setEstimate(pk[f]);
+    for (auto& [j, p] : P.vp) p->setEstimate(pp[j]);
   }
-  opt.initializeOptimization(0);
-  opt.optimize(10);
-  st.rms_after = rms();
+  P.opt.initializeOptimization(0);
+  P.opt.optimize(10);
+  P.st.rms_after = rms();
+  P.st.ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
 
-  // ---- write back ----
+LocalBAStats local_ba_apply(VOTracker& vo, LocalBAProblem& P) {
+  const auto t0 = std::chrono::steady_clock::now();
+  LocalBAStats& st = P.st;
+  if (vo.map_version != P.version) {  // BA 하는 동안 루프 보정이 맵을 바꿈 -> 낡은 결과는 버림
+    st.discarded = true;
+    return st;
+  }
+  // ---- write back ---- (BA 동안 트래킹이 지운 점/라인은 되살리지 않음)
   std::unordered_map<int, Pose> old;
-  for (int f : free) {
+  for (int f : P.free) {
     old[f] = vo.poses[f];
-    const g2o::SE3Quat T = vk[f]->estimate();
+    const g2o::SE3Quat T = P.vk[f]->estimate();
     vo.poses[f] = Pose{T.rotation().toRotationMatrix(), T.translation()};
   }
   std::unordered_set<int> bad;
-  for (auto& o : edges) {
+  for (auto& o : P.edges) {
     o.e->computeError();
-    if (o.e->chi2() > chi2_th || !o.e->isDepthPositive()) bad.insert(o.j);
+    if (o.e->chi2() > kBaChi2 || !o.e->isDepthPositive()) bad.insert(o.j);
   }
-  for (auto& [j, p] : vp) {
+  for (auto& [j, p] : P.vp) {
+    if (!vo.map_p.count(j)) continue;
     if (bad.count(j)) {
       vo.map_p.erase(j), vo.mature_p.erase(j);
     } else {
@@ -289,20 +372,40 @@ LocalBAStats local_ba(VOTracker& vo, int window, int max_fixed) {
     }
   }
   st.outliers = bad.size();
-  // 창 안 비키프레임: 직전 (자유) 키프레임의 보정을 같이 (T_f <- T_f T_kf,old^-1 T_kf,new)
+  std::unordered_set<int> lbad;
+  for (auto& o : P.ledges)
+    if (o.e->computeError(), o.e->chi2() > kBaChi2) lbad.insert(o.j);
+  for (auto& [j, l] : P.vl) {
+    if (!vo.map_l.count(j)) continue;
+    if (lbad.count(j)) {
+      vo.map_l.erase(j), vo.mature_l.erase(j);
+    } else {
+      vo.map_l[j] = from_orth(l->estimate());
+      vo.mature_l.insert(j);  // BA 가 맡은 라인: 재삼각측량에서 제외
+    }
+  }
+  st.line_outliers = lbad.size();
+  // 창 안 비키프레임 + BA 동안 트래킹한 프레임: 직전 (자유) 키프레임의 보정을 같이 (T_f <- T_f T_kf,old^-1 T_kf,new)
   const int k_last = int(vo.poses.size()) - 1;
-  for (int f = free.front(); f <= k_last; ++f) {
+  for (int f = P.free.front(); f <= k_last; ++f) {
     if (!vo.has_pose[f] || old.count(f)) continue;
-    auto it = std::upper_bound(free.begin(), free.end(), f);
-    if (it == free.begin()) continue;
+    auto it = std::upper_bound(P.free.begin(), P.free.end(), f);
+    if (it == P.free.begin()) continue;
     const int kf = *(it - 1);
     const Pose &ko = old[kf], &kn = vo.poses[kf];
     const Mat3 Rc = ko.R.transpose() * kn.R;
     const Vec3 tc = ko.R.transpose() * (kn.t - ko.t);
     vo.poses[f] = Pose{orthonormalize(vo.poses[f].R * Rc), vo.poses[f].R * tc + vo.poses[f].t};
   }
-  st.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  st.ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   return st;
+}
+
+LocalBAStats local_ba(VOTracker& vo, int window, int max_fixed, bool lines, bool mature_only) {
+  LocalBAPtr P = local_ba_build(vo, window, max_fixed, lines, mature_only);
+  if (!P) return LocalBAStats{};
+  local_ba_solve(*P);
+  return local_ba_apply(vo, *P);
 }
 
 }  // namespace vp

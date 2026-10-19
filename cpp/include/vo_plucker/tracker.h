@@ -7,11 +7,33 @@
 //   depth  : (use_depth) metric depth per point (e.g. LiDAR / depth network): init from one frame, points with depth
 //            go straight into the map (frozen), tracking 6-DoF against the map; points without depth are triangulated
 #pragma once
+#include <atomic>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "vo_plucker/geometry.h"
+
+namespace vp {
+// 트래킹 / 루프 / 로컬 매핑 스레드가 vo 를 같이 쓸 때의 lock (ORB-SLAM3 mMutexMapUpdate). 트래킹은 프레임 처리 동안 잡고,
+// 다른 스레드가 기다리고 있으면 다음 프레임 전에 먼저 양보
+struct MapLock {
+  std::mutex mx;
+  std::atomic<int> want{0};
+  std::unique_lock<std::mutex> tracking() {
+    while (want > 0) std::this_thread::yield();
+    return std::unique_lock<std::mutex>(mx);
+  }
+  std::unique_lock<std::mutex> worker() {
+    ++want;
+    std::unique_lock<std::mutex> l(mx);
+    --want;
+    return l;
+  }
+};
+}  // namespace vp
 
 namespace vp {
 
@@ -59,6 +81,8 @@ struct TrackerParams {
   bool local_ba = false;      // 키프레임마다 local BA (g2o, 점만): 키프레임 선택은 is_keyframe
   int ba_window = 10;         // local BA에서 최적화하는 최근 키프레임 수
   int ba_fixed = 10;          // 같은 점을 보는 그 앞 키프레임을 최대 이만큼 고정
+  bool ba_lines = false;      // local BA 에 라인도 (orthonormal 4-DoF, 해석 Jacobian)
+  bool ba_mature_only = false; // local BA 에 성숙한 점만
   bool keyframes = false;     // 매핑과 상관없이 키프레임 목록 유지 (루프 클로저용)
 };
 
@@ -89,12 +113,14 @@ class VOTracker {
   std::unordered_map<int, int> last_p, last_l;  // 랜드마크를 마지막으로 본 프레임 (루프 보정 기준)
   std::unordered_map<int, Pose> rel;
   std::vector<int> kfs;  // 키프레임 번호 (오름차순)
+  int map_version = 0;   // 루프/앵커 보정이 맵을 바꿀 때마다 +1 (map lock 아래) -> 그 전에 만든 local BA 결과는 버림
+  MapLock map_lock;
   int n_still = 0;       // 정지로 판정한 프레임 수
   int n_map6dof = 0;     // parallax가 작아서 맵 기준 6-DoF로 추정한 프레임 수
   long n_depth_pts = 0;  // 깊이로 만든 맵 점 수
   int n_ba = 0;          // local BA 실행 수
   double ba_ms = 0;      // local BA 누적 시간
-  long ba_points = 0, ba_outliers = 0;
+  long ba_points = 0, ba_outliers = 0, ba_lines_used = 0, ba_line_outliers = 0;
   double ba_rms_before = 0, ba_rms_after = 0;  // 누적 (실행 수로 나누면 평균)
   int failed_at = -1;  // tracking 실패 프레임 (-1 = 정상), 실패 후에는 추적 안 함 (relocalization 없음)
   std::string fail_reason;

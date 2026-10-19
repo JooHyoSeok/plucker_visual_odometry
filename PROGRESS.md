@@ -159,3 +159,25 @@
   KITTI 루프 없음 중앙값 drift 2.20→1.55 %, t_rel 12.2→8.9 %, 추세 +69→+32 %/km, 08 끝까지 추적. 루프 포함 1.31→1.15 %, 7.15→5.83 %.
   하지만 03/04(직진)와 루프 켠 00/05/06은 나빠짐 → 가중치(w4/w10), 회전 게이트(0.3/0.6°)는 시퀀스별 트레이드오프만 바꿈.
 - **결정**: `--hybrid --hybrid-fix-rot`은 옵션(기본 꺼짐). 남은 랜덤 점프(맵이 시야를 벗어나는 U턴)는 VO만으로 못 막음 → Stage 2 (DA3 metric depth 앵커)에서 hybrid와 조합 재평가.
+
+### Stage 2. DA3 metric depth 스케일 앵커 (`--depth-prior da3`)
+- 방식: 키프레임마다 DA3NESTED-GIANT-LARGE (1008 px) metric depth vs 그 키프레임 VO 맵 점 깊이 → a_k = median(VO/DA3) ("1 m = VO 몇 단위").
+  처음 10개 앵커 중앙값 a_ref, Sim(3) PGO 정점마다 단항 엣지 log s_k = log(a_k/a_ref) (σ 0.08, Huber 2σ), 10 키프레임마다 PGO (루프 스레드, 루프 없이도).
+  최근 앵커 편차 중앙값 < 5 %면 PGO 생략 (`--depth-prior-min-dev 0.05`, 좋은 구간에 노이즈를 안 넣게).
+- DA3 정확도 (06, GT 포즈 삼각측량 깊이 기준): 504 px 프레임 간 흔들림 12 %, 1008 px 6.3 % (전역 편향 +18 %는 앵커에 무관). 깊이 의존 편향(근거리 +23 %)을 프레임마다 직선으로 맞추면 오히려 9.6 %로 나빠짐 → 중앙값 유지.
+- KITTI 루프 없음 중앙값 (`out_bench/S2_da3`): drift 2.20 → 0.56 %, t_rel 12.2 → 2.35 %, 스케일 추세 +69 → +1.9 %/km. ORB-SLAM(루프 포함)보다 6/10 시퀀스에서 좋음 (02*, 05, 06, 08, 09, 10).
+  나쁜 곳: 04 (0.28 → 2.4 m, 원래 드리프트가 없는 직진), 00 (9.1 vs ORB 6.7). 02는 한 번 추적 실패 (재현 안 됨, DA3 GPU 비결정성).
+- 그림: `out_bench/plots/paper_traj_da3.{png,pdf}` (논문 스타일), `stage2_vs_orbslam.png`, 영상 `out_bench/videos/stage2_da3_anchor_kitti06*.mp4`.
+- 주의: DA3 서버 1개 ~8–10 GB GPU → 동시 3개까지 (4개째에서 OOM 으로 서버가 죽은 적 있음).
+
+### Stage 3. 루프 견고성 (`--loop-consist N`, `--loop-prune R`, `--loop-min-f N`)
+- 연속 일관성 (ORB-SLAM3 mnLoopNumCoincidences), PGO 뒤 이상치 루프 엣지 제거, ORB 키포인트를 VO 맵 점 (u, v, 깊이) 에 붙여 3D 확보.
+- KITTI 루프 동기식 (`out_bench/S3_*`): 둘 다 켜면 drift 중앙값 1.31 → 1.18 %, t_rel 7.15 → 5.86 %. 06 22.9 → 14.3 m, 00 5.9 → 9.5 m (엇갈림).
+- 07/09 끝 루프: 검색은 맞게 찾지만 ORB F 인라이어 40–50 (기준 80) + Sim(3) 3D 쌍 부족 (ORB 코너와 KLT 맵 점이 잘 안 겹침, 반경을 넓히면 깊이가 부정확해 Sim(3) RANSAC 2–5/30–50).
+  → 남은 길: `orb+mast3r` (metric 상대포즈, 로컬 3D 불필요) 또는 DA3 깊이로 ORB 키포인트 3D.
+
+### Stage 5. BA 라인 factor (`--ba-lines`, `cpp/include/vo_plucker/g2o_line.h`)
+- orthonormal 4-DoF 정점 (U ∈ SO(3), φ) + 끝점 거리 엣지, 해석 Jacobian (g2o 왼쪽 섭동). `test_optimizer`: 수치 미분과 2.9e-10, 왕복 1e-14, 기존 선 오차와 5e-13.
+- 퇴화 라인 필터 필수: 창 안 첫/마지막 관측 역투영 평면 각도 < 5°면 제외 (없으면 06 마지막 방향 오차 1.3° → 21°).
+- 06/07/10 루프 없음: BA 점 63.1 / 19.7 / 22.5 m → BA 점+라인 51.3 / 12.8 / 13.7 m (세 시퀀스 모두 나음, 07은 BA 없음 14.9 보다도 좋음).
+- 앞으로 테스트는 06/07/10 세 시퀀스만 (사용자 요청), 전체 11개는 단계 마무리 때만.

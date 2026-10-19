@@ -7,6 +7,9 @@
 #include <cstdio>
 #include <random>
 
+#include <g2o/core/jacobian_workspace.h>
+
+#include "vo_plucker/g2o_line.h"
 #include "vo_plucker/optimizer.h"
 
 using namespace vp;
@@ -102,4 +105,67 @@ static bool hybrid_check() {
   return ok;
 }
 
-int main() { return trial_set(0.0) && trial_set(0.1) && hybrid_check() ? 0 : 1; }
+// EdgeLineProjection: 해석 Jacobian vs 중앙 차분 (라인 4, 포즈 6), orthonormal <-> Plücker 왕복, 기존 project_line 과 같은 오차
+static bool line_edge_check() {
+  const Camera cam(707.0912, 707.0912, 601.8873, 183.1104, 1226, 370);
+  std::mt19937 rng(2);
+  std::normal_distribution<double> n01(0, 1);
+  std::uniform_real_distribution<double> uni(0, 1);
+  double worst_j = 0, worst_rt = 0, worst_res = 0;
+  for (int it = 0; it < 200; ++it) {
+    const Pose T{so3_exp(Vec3(n01(rng), n01(rng), n01(rng)) * 0.3), Vec3(n01(rng), n01(rng), n01(rng)) * 2};
+    const Vec3 pc((uni(rng) - 0.5) * 10, (uni(rng) - 0.5) * 4, 5 + uni(rng) * 25);  // 카메라 앞 점
+    const Vec3 dc = Vec3(n01(rng), n01(rng), n01(rng) * 0.3).normalized();
+    const Vec3 pw = T.R.transpose() * (pc - T.t), dw = T.R.transpose() * dc;
+    Line L;
+    L << dw, pw.cross(dw);
+    auto proj = [&](const Vec3& X) { const Vec3 q = cam.K * (T.R * X + T.t); return Vec2(q.head<2>() / q(2)); };
+    const Vec2 a = proj(pw - 2 * dw) + Vec2(n01(rng), n01(rng)), b = proj(pw + 2 * dw) + Vec2(n01(rng), n01(rng));
+    const Vec4 seg(a(0), a(1), b(0), b(1));
+    const Line L2 = from_orth(to_orth(L));  // 왕복: 방향 부호까지 같아야 (d.m = 0, |d| = 1)
+    worst_rt = std::max(worst_rt, (L2 - L).cwiseAbs().maxCoeff());
+
+    auto* vl = new VertexLineOrth();
+    vl->setEstimate(to_orth(L));
+    auto* vp = new g2o::VertexSE3Expmap();
+    vp->setEstimate(g2o::SE3Quat(T.R, T.t));
+    EdgeLineProjection e;
+    e.setVertex(0, vl), e.setVertex(1, vp);
+    e.setMeasurement(seg);
+    e.KL = cam.KL;
+    e.computeError();
+    MapObs mo;
+    mo.L.push_back(L), mo.seg.push_back(seg);
+    worst_res = std::max(worst_res, (e.error() - residuals(cam, T, mo)).cwiseAbs().maxCoeff());  // 기존 선 오차와 같음
+    g2o::JacobianWorkspace ws;  // 고정 크기 엣지의 Jacobian 은 작업공간 메모리를 가리키는 Map (최적화기가 보통 할당)
+    ws.updateSize(&e);
+    ws.allocate();
+    e.linearizeOplus(ws);
+    const Eigen::Matrix<double, 2, 4> Jl = e.J_line();
+    const Eigen::Matrix<double, 2, 6> Jp = e.J_pose();
+    auto numeric = [&](g2o::OptimizableGraph::Vertex* v, int dim, Eigen::MatrixXd& J) {
+      J.resize(2, dim);
+      for (int k = 0; k < dim; ++k) {
+        double d[6] = {0, 0, 0, 0, 0, 0};
+        const double h = 1e-6;
+        v->push(), d[k] = h, v->oplus(d), e.computeError();
+        const Vec2 ep = e.error();
+        v->pop(), v->push(), d[k] = -h, v->oplus(d), e.computeError();
+        J.col(k) = (ep - e.error()) / (2 * h);
+        v->pop();
+      }
+    };
+    Eigen::MatrixXd Nl, Np;
+    numeric(vl, 4, Nl), numeric(vp, 6, Np);
+    const double scale = std::max({Nl.cwiseAbs().maxCoeff(), Np.cwiseAbs().maxCoeff(), 1.0});
+    worst_j = std::max({worst_j, (Jl - Nl).cwiseAbs().maxCoeff() / scale, (Jp - Np).cwiseAbs().maxCoeff() / scale});
+    delete vl, delete vp;
+  }
+  std::printf("line edge (200 random lines/poses): Jacobian analytic vs numeric max rel diff %.2e | orth round trip %.2e | "
+              "error vs project_line residual %.2e\n", worst_j, worst_rt, worst_res);
+  const bool ok = worst_j < 1e-6 && worst_rt < 1e-9 && worst_res < 1e-9;
+  std::printf("  %s\n", ok ? "OK: analytic line Jacobians match" : "FAIL");
+  return ok;
+}
+
+int main() { return trial_set(0.0) && trial_set(0.1) && hybrid_check() && line_edge_check() ? 0 : 1; }

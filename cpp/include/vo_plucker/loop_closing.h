@@ -65,7 +65,8 @@ struct KFState {
   Pose pose;              // world -> cam
   int prev = -1;          // 직전에 등록된 키프레임 (없으면 -1), 포즈는 같은 시점의 값
   Pose prev_pose;
-  std::vector<Vec3> uvd;  // 이 키프레임에 보이는 맵 점 (u, v, VO 깊이), 최대 300개
+  std::vector<Vec3> uvd;  // 이 키프레임에 보이는 맵 점 (u, v, VO 깊이), 최대 3000개
+  std::vector<int> pid;   // uvd 와 같은 순서의 맵 점 (트랙) id
 };
 
 class LoopVerifier {
@@ -78,7 +79,7 @@ class LoopVerifier {
 };
 
 std::unique_ptr<PlaceRecognizer> make_thumbnail_recognizer();
-std::unique_ptr<LoopVerifier> make_orb_verifier(const Camera& cam);
+std::unique_ptr<LoopVerifier> make_orb_verifier(const Camera& cam, int min_f = 80);  // min_f: F-RANSAC 인라이어 최소
 
 // Python 플러그인 서버 (stdin/stdout 줄 프로토콜, python/loop_server.py 참고). 한 프로세스를 후보 검색과 검증이 공유
 struct LoopServer;
@@ -95,17 +96,26 @@ struct LoopParams {
   bool threaded = true;  // false: 트래킹 스레드에서 그 자리에서 처리 (결과 재현용)
   int max_backlog = 2;   // 큐에 이보다 많이 밀려 있으면 오래된 키프레임은 버림 (등록도 검출도 안 함)
   double skip_chi2 = 0;  // 새 루프 엣지의 현재 포즈 chi2 가 이보다 작으면 (이미 맞음) 엣지만 추가, PGO 생략
+  int consist_n = 1;          // ORB-SLAM3 식 연속 일관성: 연속 질의 키프레임 이 수만큼 같은 장소를 가리켜야 채택 (1 = 끔)
+  int consist_frames = 30;    //   "같은 장소": 후보 프레임 차이가 이 이내, 질의 키프레임 간격도 이 이내
+  double prune_ratio = 0;     // PGO 뒤 루프 엣지 chi2 가 루프 엣지 중앙값의 이 배수보다 크면 (그리고 > 100) 빼고 재최적화 (0 = 끔)
+  bool fuse = false;          // 루프 보정 뒤 옛 맵 점과 현재 트랙 융합 (ORB 디스크립터 + 투영) -> covisibility -> 연결된 후보 제외
+  int covis_min = 15;         //   질의 키프레임과 후보가 대표 맵 점을 이만큼 공유하면 이미 연결 -> 검증 안 함
+  double fuse_px = 8;         //   보정된 옛 점을 현재 키프레임에 투영했을 때 이 안이어야 융합
+  int fuse_nb = 2;            //   옛 키프레임 j 앞뒤로 이만큼의 키프레임까지 융합
+  int anchor_every = 10;      // metric depth 앵커: 이 키프레임 수마다 (루프 없이도) PGO
+  double anchor_sigma = 0.08; // 앵커 log-scale 표준편차 (DA3 프레임 간 흔들림 ~6 %)
+  double anchor_min_dev = 0;  // 지난 앵커 PGO 뒤 앵커들의 |log(a_k/a_ref)| 중앙값이 이보다 작으면 PGO 생략 (스케일이 맞음)
 };
 
 class LoopCloser {
  public:
+  // pr/ver 가 없으면 루프 검출 없이 동작 (anchor 만). anchor: metric depth 서버 (--depth da3) -> 키프레임 스케일 앵커
   LoopCloser(VOTracker& vo, std::unique_ptr<PlaceRecognizer> pr, std::unique_ptr<LoopVerifier> ver,
-             const LoopParams& prm = {});
+             const LoopParams& prm = {}, std::shared_ptr<LoopServer> anchor = nullptr);
   ~LoopCloser();
   // 트래킹 스레드: 새 키프레임마다. threaded 면 큐에 넣고 바로 반환, 아니면 그 자리에서 처리
   void push(int kf, const cv::Mat& img);
-  // 트래킹 스레드가 vo 를 읽고 쓰는 동안 잡는 lock. 루프 스레드가 기다리고 있으면 먼저 양보. threaded 아니면 빈 lock
-  std::unique_lock<std::mutex> lock_map();
   // 남은 큐를 끝까지 처리하고 스레드 종료 (궤적 저장 전에 호출, map lock 은 놓은 상태로)
   void finish();
 
@@ -115,12 +125,15 @@ class LoopCloser {
   double ms_blocked = 0, ms_blocked_max = 0;  // 루프 스레드가 map lock 을 잡은 시간 = 트래킹이 멈춘 시간
   int n_queries = 0, n_skipped = 0;            // n_skipped: 루프 스레드가 밀려서 버린 키프레임
   int n_pgo_skipped = 0;                       // 이미 맞는 루프라 PGO 생략
+  int n_anchors = 0, n_anchor_pgo = 0, n_anchor_skip = 0;  // 앵커가 붙은 키프레임, 앵커 PGO, 스케일이 맞아서 건너뛴 PGO
+  int n_unconfirmed = 0, n_pruned = 0;         // 연속 일관성을 못 채운 검출, PGO 뒤 빠진 루프 엣지
+  int n_fused = 0, n_excluded = 0;             // 융합한 맵 점, covisibility 로 제외한 루프 후보
   std::atomic<int> n_corrections{0};           // 맵 보정을 써넣은 횟수 (트래킹 스레드가 map lock 아래에서 읽음)
 
  private:
   void run();
   void process(int kf, const cv::Mat& img);
-  std::unique_lock<std::mutex> take_map();  // 루프 스레드 쪽 lock (대기 중 표시 -> 트래킹이 양보)
+  std::unique_lock<std::mutex> take_map() { return vo_.map_lock.worker(); }  // 작업 스레드 쪽 (트래킹이 양보)
   void blocked(double ms) { ms_blocked += ms, ms_blocked_max = std::max(ms_blocked_max, ms); }
   KFState snapshot(int kf) const;
   std::unordered_map<int, Sim3> pgo(const std::vector<Pose>& P, const std::vector<int>& sub, double& cost);
@@ -135,9 +148,25 @@ class LoopCloser {
   std::vector<int> ready_;        // 검증 가능한 키프레임 (루프 후보)
   std::unordered_map<int, Sim3> odom_;  // kf a -> 다음 키프레임까지 측정 (cam_a -> cam_b), 보정 때 단위만 맞춤
   std::vector<LoopEdge> edges_;   // PGO 루프 엣지 (보정 때 단위만 맞춤)
+  std::shared_ptr<LoopServer> anchor_;
+  std::unordered_map<int, double> anchors_;  // kf -> VO 단위/미터 (그 키프레임 카메라 단위, 보정 때 단위만 맞춤)
+  std::vector<double> first_anchors_;
+  double a_ref_ = 0;                         // 목표 VO 단위/미터 (처음 10개 앵커 중앙값)
+  int since_pgo_ = 0;
+  std::vector<LoopEdge> pending_;  // 연속 일관성 확인 중인 검출 (아직 그래프에 안 넣음)
+  // 융합 / covisibility (루프 스레드만): 키프레임 맵 점 디스크립터, 트랙 id -> 대표 (가장 옛) 맵 점 id
+  struct MapDesc {
+    std::vector<int> pid;
+    std::vector<Vec2> uv;
+    cv::Mat des;
+  };
+  std::unordered_map<int, MapDesc> map_desc_;
+  std::unordered_map<int, std::vector<int>> kf_pids_;
+  std::unordered_map<int, int> canon_;
+  int root(int p);
+  int shared(int a, int j);  // 대표 id 기준 공유 맵 점 수
+  int fuse(int a, int j);    // map lock 아래: 융합한 점 수
 
-  std::mutex map_mx_;              // vo 접근 (트래킹 <-> 루프 스레드)
-  std::atomic<bool> want_map_{false};
   std::mutex q_mx_;                // 큐
   std::condition_variable q_cv_;
   std::deque<std::pair<int, cv::Mat>> queue_;

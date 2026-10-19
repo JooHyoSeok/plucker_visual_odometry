@@ -21,7 +21,8 @@ endforeach()
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/g2o EXCLUDE_FROM_ALL)
 
-add_library(vo_plucker src/geometry.cpp src/tracker.cpp src/frontend.cpp src/optimizer.cpp src/loop_closing.cpp)
+add_library(vo_plucker src/geometry.cpp src/tracker.cpp src/frontend.cpp src/optimizer.cpp src/loop_closing.cpp
+            src/local_mapping.cpp)
 target_include_directories(vo_plucker PUBLIC include ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(vo_plucker PUBLIC Eigen3::Eigen ${OpenCV_LIBS} core stuff solver_eigen solver_dense types_sba types_slam3d
                       types_sim3)

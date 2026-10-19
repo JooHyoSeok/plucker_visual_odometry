@@ -7,3 +7,5 @@ build/
 build_dev/
 build_tsan/
 build_diag/
+build_s6/
+build_exp/

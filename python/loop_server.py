@@ -8,6 +8,9 @@ line protocol on stdin/stdout (one reply line per request):
                                         -> loop s r00 .. r22 t0 t1 t2 inliers   |   none
        (u v d) = keyframe pixels of VO map points with their VO depth -> per-keyframe VO-units-per-meter scale,
        result = Sim(3) cam_J -> cam_I in VO units (the same convention as the built-in ORB verifier)
+  anchor KF N (u v d)*N                 -> anchor A n               (--depth da3: VO units per meter at keyframe KF =
+                                                                     median(VO depth / DA3 metric depth) at the given
+                                                                     pixels, image = the one added last for KF)
   quit
 
 place recognition (--pr): netvlad (hloc, VGG16-NetVLAD-Pitts30K), salad (DINOv2-SALAD),
@@ -19,7 +22,11 @@ features, verification runs only the decoder on the cached pair.
 Model code is imported from the installed packages (hloc, SALAD repo, MASt3R); weights from the paths below.
 Licenses differ per model (MASt3R: CC BY-NC-SA 4.0) - check before non-research use.
 
-usage: python3 loop_server.py --pr mast3r --ver mast3r [--device cuda]
+depth anchor     (--depth): da3 (Depth Anything 3 DA3NESTED-GIANT-LARGE metric depth at 1008 px; KITTI 06: frame-to-frame
+                          spread of the median ratio 6 %, 18 % global bias that does not matter for a scale anchor;
+                          fitting the depth-dependent bias per frame made the spread worse, 9.6 %)
+
+usage: python3 loop_server.py --pr mast3r --ver mast3r [--depth da3] [--device cuda]
 """
 import argparse
 import sys
@@ -33,6 +40,7 @@ HOME = Path.home() / "Desktop/hyoseok"
 SALAD_REPO = HOME / "3D_Reconstructions/VGGT-SLAM/salad"
 SALAD_CKPT = Path(torch.hub.get_dir()) / "checkpoints/dino_salad.ckpt"
 MAST3R_CKPT = HOME / "MASt3R-SLAM/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth"
+DA3_REPO = HOME / "Depth-Anything-3"
 MAST3R_RETRIEVAL = HOME / "MASt3R-SLAM/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth"
 
 
@@ -178,19 +186,39 @@ class Mast3r:
         return a_i / a_j, R_ij, a_i * t_ij, int(n_in)           # VO units: X_i = (a_i/a_j) R X_j + a_i t
 
 
+# ---------------- metric depth anchor ----------------
+class Da3Depth:
+    RES, ZMIN, ZMAX = 1008, 3.0, 40.0  # DA3 깊이 이 범위의 점만 (가까운 곳은 편향 크고 먼 곳은 VO 깊이가 부정확)
+
+    def __init__(self, device):
+        sys.path.insert(0, str(DA3_REPO / "src"))
+        from depth_anything_3.api import DepthAnything3
+        self.net = DepthAnything3.from_pretrained("depth-anything/DA3NESTED-GIANT-LARGE").to(device).eval()
+
+    @torch.no_grad()
+    def __call__(self, bgr, pts):
+        dep = self.net.inference([cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)], process_res=self.RES).depth[0]
+        sy, sx = dep.shape[0] / bgr.shape[0], dep.shape[1] / bgr.shape[1]
+        z = dep[np.clip((pts[:, 1] * sy).astype(int), 0, dep.shape[0] - 1), np.clip((pts[:, 0] * sx).astype(int), 0, dep.shape[1] - 1)]
+        ok = (z > self.ZMIN) & (z < self.ZMAX) & (pts[:, 2] > 0)
+        return (float(np.median(pts[ok, 2] / z[ok])), int(ok.sum())) if ok.sum() >= 20 else None
+
+
 def main():
     reply_out = sys.stdout  # 프로토콜 응답 전용. 라이브러리가 stdout에 찍는 메시지는 stderr로 돌림
     sys.stdout = sys.stderr
     ap = argparse.ArgumentParser()
     ap.add_argument("--pr", default="none", choices=["none", "netvlad", "salad", "mast3r"])
     ap.add_argument("--ver", default="none", choices=["none", "mast3r"])
+    ap.add_argument("--depth", default="none", choices=["none", "da3"])
     ap.add_argument("--device", default="cuda")
     o = ap.parse_args()
     m3r = Mast3r(o.device, retrieval=o.pr == "mast3r") if "mast3r" in (o.pr, o.ver) else None  # 검색/검증이 공유
     pr = {"none": None, "netvlad": NetVLAD, "salad": Salad, "mast3r": None}[o.pr]
     pr = pr(o.device) if pr else None
-    log(f"[loop_server] ready: pr={o.pr} ver={o.ver} device={o.device}")
-    desc = {}
+    depth = Da3Depth(o.device) if o.depth == "da3" else None
+    log(f"[loop_server] ready: pr={o.pr} ver={o.ver} depth={o.depth} device={o.device}")
+    desc, last_img = {}, {}
     for line in sys.stdin:
         t = line.split()
         if not t:
@@ -204,12 +232,19 @@ def main():
                     desc[kf] = pr(img)
                 if m3r:
                     m3r.add(kf, img)
+                if depth:
+                    last_img = {kf: img}  # anchor 요청은 add 바로 뒤에 옴
                 reply = "ok"
             elif t[0] == "query":
                 kf, k, cands = int(t[1]), int(t[2]), [int(x) for x in t[3:]]
                 s = m3r.query(kf, cands, k) if o.pr == "mast3r" else \
                     sorted(((float(desc[kf] @ desc[j]), j) for j in cands), reverse=True)[:k]
                 reply = "cand " + " ".join(f"{j} {v:.4f}" for v, j in s)
+            elif t[0] == "anchor":
+                kf, n = int(t[1]), int(t[2])
+                pts = np.array(t[3:3 + 3 * n], float).reshape(-1, 3)
+                r = depth(last_img.pop(kf), pts) if depth and kf in last_img else None
+                reply = "none" if r is None else f"anchor {r[0]:.9g} {r[1]}"
             elif t[0] == "verify":
                 i, j = int(t[1]), int(t[2])
                 K = [float(x) for x in t[3:7]]

@@ -1,7 +1,7 @@
 // C++ monocular VO (points + Plücker lines): images in one by one -> pose out. Optional loop closure + Sim(3) PGO (--loop, pluggable modules).
 // usage: run_vo [n_frames] --video PATH|CAM_INDEX [--gt PATH] [--calib fx,fy,cx,cy] [--no-lines] [--traj OUT.txt]
 //               [--init-frame N | --init-px P] [--kf-mapping] [--no-reattach]
-//               [--rel-static] [--drop-dynamic] [--rel-min-px P] [--resize S] [--stride N] [--start N] [--min-parallax DEG] [--mature-deg DEG] [--init-min-points N] [--sim3-align] [--pose-g2o] [--hybrid] [--hybrid-w W] [--local-ba] [--ba-window N] [--ba-fixed N] [--kf-parallax PX] [--loop] [--loop-pr thumb|netvlad|salad|mast3r] [--loop-ver orb|mast3r|orb+mast3r] [--loop-python PY] [--loop-min-sim S] [--loop-shortlist N] [--loop-min-gap N] [--loop-no-feedback] [--loop-sync] [--loop-skip-chi2 X] [--autostart] [--traj-online OUT.txt] [--dump-map OUT.txt] [--no-viewer] [--snapshot OUT.png]
+//               [--rel-static] [--drop-dynamic] [--rel-min-px P] [--resize S] [--stride N] [--start N] [--min-parallax DEG] [--mature-deg DEG] [--init-min-points N] [--sim3-align] [--pose-g2o] [--hybrid] [--hybrid-w W] [--local-ba] [--ba-window N] [--ba-fixed N] [--ba-lines] [--ba-mature-only] [--ba-sync] [--kf-parallax PX] [--loop] [--loop-pr thumb|netvlad|salad|mast3r] [--loop-ver orb|mast3r|orb+mast3r] [--loop-python PY] [--loop-min-sim S] [--loop-shortlist N] [--loop-min-gap N] [--loop-no-feedback] [--loop-sync] [--loop-skip-chi2 X] [--loop-consist N] [--loop-min-f N] [--loop-prune R] [--loop-fuse] [--loop-fuse-nb N] [--loop-covis-min N] [--depth-prior da3] [--depth-prior-every N] [--depth-prior-sigma S] [--depth-prior-min-dev D] [--autostart] [--traj-online OUT.txt] [--dump-map OUT.txt] [--no-viewer] [--snapshot OUT.png]
 //   --resize S : 영상과 intrinsic을 S배 (고해상도 입력용, 예: iPhone 1920x1440 -> 0.5)
 //   --stride N : N 프레임마다 하나만 사용 (고 fps / 느린 이동용). GT도 같은 간격으로 맞춤
 //   --start N  : 처음 N 프레임 건너뛰기 (예: 시작이 제자리 회전뿐인 핸드헬드 영상). GT도 N부터
@@ -25,6 +25,7 @@
 #include <thread>
 
 #include "vo_plucker/frontend.h"
+#include "vo_plucker/local_mapping.h"
 #include "vo_plucker/loop_closing.h"
 #ifdef VP_WITH_VIEWER
 #include "vo_plucker/viewer.h"
@@ -159,8 +160,13 @@ int main(int argc, char** argv) {
   prm.hybrid_fix_rot = flag(argc, argv, "--hybrid-fix-rot");                  // 회전은 2D-2D 그대로, 이동만
   prm.pose_g2o = flag(argc, argv, "--pose-g2o");  // 6-DoF 추정을 g2o motion-only BA로
   prm.local_ba = flag(argc, argv, "--local-ba");  // 키프레임마다 local BA (g2o, 점만)
+  // 기본: local BA 를 별도 스레드 (LocalMapper, ORB-SLAM3 LocalMapping). --ba-sync: 예전처럼 트래킹 안에서
+  const bool ba_thread = prm.local_ba && !flag(argc, argv, "--ba-sync");
+  if (ba_thread) prm.local_ba = false;
   prm.ba_window = std::atoi(arg(argc, argv, "--ba-window", "10"));
   prm.ba_fixed = std::atoi(arg(argc, argv, "--ba-fixed", "10"));
+  prm.ba_lines = flag(argc, argv, "--ba-lines");  // local BA 에 라인도 (orthonormal 4-DoF 정점 + 끝점 거리 엣지)
+  prm.ba_mature_only = flag(argc, argv, "--ba-mature-only");  // local BA 에 성숙한 (시차 충분) 점만
   prm.kf_parallax_px = std::atof(arg(argc, argv, "--kf-parallax", "10"));  // 키프레임: 회전 보정 parallax 중앙값 [px]
   // 루프 클로저: --loop (내장: 썸네일 후보 + ORB/Sim(3) 검증) -> 키프레임마다 검사, 찾으면 Sim(3) PGO + 맵 보정
   //   --loop-pr netvlad|salad|mast3r, --loop-ver mast3r: python/loop_server.py 를 --loop-python 인터프리터로 띄워서 사용
@@ -172,12 +178,22 @@ int main(int argc, char** argv) {
     return 1;
   }
   bool use_loop = flag(argc, argv, "--loop") || loop_pr != "thumb" || loop_ver != "orb";
+  // --depth-prior da3: 키프레임마다 DA3 metric depth 로 스케일 앵커 -> 주기적 Sim(3) PGO (루프 스레드, 루프 없이도)
+  bool use_anchor = std::string(arg(argc, argv, "--depth-prior", "none")) == "da3";
   LoopParams lprm;
   lprm.min_gap = std::atoi(arg(argc, argv, "--loop-min-gap", "150"));
   lprm.feedback = !flag(argc, argv, "--loop-no-feedback");
   lprm.threaded = !flag(argc, argv, "--loop-sync");
   // 새 루프 엣지가 이미 현재 추정과 맞으면 (chi2 < 이 값) 엣지만 추가, PGO 생략. 0: 항상 PGO. 00/06 에서 50 이 가장 좋음
-  lprm.skip_chi2 = std::atof(arg(argc, argv, "--loop-skip-chi2", "50"));  // 기본: 루프 클로징 별도 스레드 (ORB-SLAM3 처럼). sync = 재현용
+  lprm.skip_chi2 = std::atof(arg(argc, argv, "--loop-skip-chi2", "50"));
+  lprm.consist_n = std::atoi(arg(argc, argv, "--loop-consist", "1"));          // 연속 일관성 키프레임 수 (ORB-SLAM3: 3)
+  lprm.prune_ratio = std::atof(arg(argc, argv, "--loop-prune", "0"));          // PGO 뒤 이상치 루프 엣지 제거 배수
+  lprm.fuse = flag(argc, argv, "--loop-fuse");  // 루프 보정 뒤 맵 점 융합 + covisibility 로 이미 연결된 후보 제외
+  lprm.fuse_nb = std::atoi(arg(argc, argv, "--loop-fuse-nb", "2"));
+  lprm.covis_min = std::atoi(arg(argc, argv, "--loop-covis-min", "15"));
+  lprm.anchor_every = std::atoi(arg(argc, argv, "--depth-prior-every", "10"));
+  lprm.anchor_sigma = std::atof(arg(argc, argv, "--depth-prior-sigma", "0.08"));
+  lprm.anchor_min_dev = std::atof(arg(argc, argv, "--depth-prior-min-dev", "0.05"));  // 스케일 편차가 이보다 작으면 앵커 PGO 생략  // 기본: 루프 클로징 별도 스레드 (ORB-SLAM3 처럼). sync = 재현용
   // 초기화: --init-frame N이면 그 프레임, 아니면 frame 0 대비 픽셀 이동 중앙값이 --init-px 이상이 될 때 (07처럼 천천히 출발해도)
   const int init_fixed = std::atoi(arg(argc, argv, "--init-frame", "0"));
   const double init_px = std::atof(arg(argc, argv, "--init-px", "20"));  // 이 이상이면 초기화 시도, 품질이 안 되면 다음 프레임 재시도
@@ -216,33 +232,39 @@ int main(int argc, char** argv) {
     for (const auto& T : gt) gt_cw.push_back(Pose{T.leftCols<3>().transpose(), -T.leftCols<3>().transpose() * T.col(3)});
     const bool ask = !flag(argc, argv, "--autostart");  // --autostart: 시작 화면 없이 인자대로 바로
     viewer = std::make_unique<Viewer>(cam, gt_cw, flag(argc, argv, "--sim3-align"),
-                                      ask ? std::optional<RunOptions>(RunOptions{use_loop, loop_pr, loop_ver, prm.use_lines})
+                                      ask ? std::optional<RunOptions>(RunOptions{use_loop, loop_pr, loop_ver, prm.use_lines, use_anchor})
                                           : std::nullopt);
     if (ask) {
       std::printf("viewer: choose options in the menu and press Start\n");
       const auto o = viewer->wait_start();
       if (!o) return 0;  // Start 전에 창을 닫음
-      use_loop = o->loop, loop_pr = o->pr, loop_ver = o->ver, prm.use_lines = o->lines;
+      use_loop = o->loop, loop_pr = o->pr, loop_ver = o->ver, prm.use_lines = o->lines, use_anchor = o->depth_prior;
     }
   }
 #endif
-  prm.keyframes = use_loop;
+  prm.keyframes = use_loop || use_anchor || ba_thread;
   lprm.shortlist = std::atoi(arg(argc, argv, "--loop-shortlist", loop_ver == "orb" ? "15" : "3"));  // MASt3R는 쌍당 비쌈
   // 후보 유사도 하한: netvlad/salad 코사인 0.5, mast3r ASMK 점수 0.02 (06: 참 루프 0.06-0.11, 그 외 <= 0.018)
   const double loop_min_sim = std::atof(arg(argc, argv, "--loop-min-sim", loop_pr == "mast3r" ? "0.02" : "0.5"));
   Frontend front;
   VOTracker vo(cam, prm);
   std::unique_ptr<LoopCloser> loop;
-  if (use_loop) {
+  if (use_loop || use_anchor) {
     std::shared_ptr<LoopServer> srv;
-    if (loop_pr != "thumb" || loop_ver != "orb")
+    const bool py_pr = use_loop && loop_pr != "thumb", py_ver = use_loop && loop_ver != "orb";
+    if (py_pr || py_ver || use_anchor)
       srv = start_loop_server(std::string(arg(argc, argv, "--loop-python", "python3")) + " " VP_LOOP_SERVER " --pr " +
-                              (loop_pr == "thumb" ? "none" : loop_pr) + " --ver " + (loop_ver == "orb" ? "none" : "mast3r"));
-    auto ver = loop_ver == "orb"      ? make_orb_verifier(cam)
-               : loop_ver == "mast3r" ? make_py_verifier(srv, cam)
-                                      : make_cascade_verifier(cam, make_py_verifier(srv, cam));
-    loop = std::make_unique<LoopCloser>(vo, loop_pr == "thumb" ? make_thumbnail_recognizer() : make_py_recognizer(srv, loop_min_sim),
-                                        std::move(ver), lprm);
+                              (py_pr ? loop_pr : "none") + " --ver " + (py_ver ? "mast3r" : "none") +
+                              (use_anchor ? " --depth da3" : ""));
+    std::unique_ptr<PlaceRecognizer> pr;
+    std::unique_ptr<LoopVerifier> ver;
+    if (use_loop) {
+      pr = py_pr ? make_py_recognizer(srv, loop_min_sim) : make_thumbnail_recognizer();
+      ver = loop_ver == "orb"      ? make_orb_verifier(cam, std::atoi(arg(argc, argv, "--loop-min-f", "80")))
+            : loop_ver == "mast3r" ? make_py_verifier(srv, cam)
+                                   : make_cascade_verifier(cam, make_py_verifier(srv, cam));
+    }
+    loop = std::make_unique<LoopCloser>(vo, std::move(pr), std::move(ver), lprm, use_anchor ? srv : nullptr);
   }
   // --traj-online: 프레임마다 그 순간의 추정 포즈 (나중 루프 보정 전 값) "k T_wc(3x4)" -> 영상 도구용
   //   + 루프 보정이 들어올 때마다 그 시점 전체 궤적 스냅샷 "k f x y z" (위치만) -> OUT_snap.txt
@@ -257,12 +279,16 @@ int main(int argc, char** argv) {
   // --dump-map (진단): 프레임마다 관측 "o k pid u v" + 그 프레임에 보이는 맵 점 "m k pid X Y Z mature" (world, 매핑 후)
   std::ofstream fdump;
   if (const char* p = arg(argc, argv, "--dump-map", nullptr)) fdump.open(p), fdump.precision(7);
+  std::unique_ptr<LocalMapper> mapper;  // loop 보다 뒤에 선언 -> 먼저 소멸 (둘 다 vo 보다 먼저)
+  if (ba_thread) mapper = std::make_unique<LocalMapper>(vo, prm.ba_window, prm.ba_fixed, prm.ba_lines && prm.use_lines,
+                                                         prm.ba_mature_only);
   std::map<int, cv::Mat> recent_img;  // 키프레임 등록용 최근 영상 (BGR, 초기화 때 키프레임이 몇 프레임 늦게 정해짐)
   size_t kf_done = 0;
   double t_loop = 0;
   std::printf("source %s, %dx%d, K=(%g,%g,%g,%g), stride %d, lines %d, loop %s\n", src, frame.cols, frame.rows, cam.fx,
               cam.fy, cam.cx, cam.cy, stride, prm.use_lines,
               use_loop ? (loop_pr + " + " + loop_ver + (lprm.threaded ? ", thread" : ", sync")).c_str() : "off");
+  if (use_anchor) std::printf("depth prior: DA3 metric depth scale anchor every %d keyframes (sigma %.2f)\n", lprm.anchor_every, lprm.anchor_sigma);
 
   // 실험용 (기본 꺼짐, KITTI 06/07에서 이득 불분명): 2D-2D를 맵 점 트랙만으로 / 자기운동에 안 맞는 트랙 제거
   const bool no_reattach = flag(argc, argv, "--no-reattach"), rel_all = !flag(argc, argv, "--rel-static"),
@@ -282,7 +308,8 @@ int main(int argc, char** argv) {
     FrameObs o = front.step(gray);
     // 여기부터 vo 를 읽고 씀 -> map lock (루프 스레드가 보정을 써넣는 중이면 그동안 대기)
     const auto tw = Clock::now();
-    auto map_lock = loop ? loop->lock_map() : std::unique_lock<std::mutex>();
+    const bool threads = (loop && lprm.threaded) || mapper;  // 루프 / 매핑 스레드가 vo 를 같이 씀
+    auto map_lock = threads ? vo.map_lock.tracking() : std::unique_lock<std::mutex>();
     const double wait = ms_since(tw);
     t_wait += wait, t_wait_max = std::max(t_wait_max, wait);
     if (const auto pred = vo.predict(); pred && !no_reattach) n_reattach += front.reattach(cam, vo, *pred, o);
@@ -332,13 +359,16 @@ int main(int argc, char** argv) {
       for (int r = 0; r < 3; ++r) fon << " " << Rwc(r, 0) << " " << Rwc(r, 1) << " " << Rwc(r, 2) << " " << C(r);
       fon << "\n";
     }
-    if (loop) {
-      const auto tl = Clock::now();
+    std::vector<std::pair<int, cv::Mat>> new_kfs;  // 프레임 처리 끝 (map lock 해제 뒤) 에 루프 / 매핑 스레드로
+    if (loop || mapper) {
       if (vo.kfs.size() < kf_done) kf_done = 0;  // 초기화 재시도로 키프레임 목록이 비워짐
       for (; kf_done < vo.kfs.size(); ++kf_done)
-        if (const auto it = recent_img.find(vo.kfs[kf_done]); it != recent_img.end() && vo.failed_at < 0)
-          loop->push(vo.kfs[kf_done], it->second);
-      t_loop += ms_since(tl);
+        if (vo.failed_at < 0) {
+          const auto it = recent_img.find(vo.kfs[kf_done]);
+          new_kfs.emplace_back(vo.kfs[kf_done], it != recent_img.end() ? it->second : cv::Mat());
+        }
+    }
+    if (loop) {
       if (fsnap.is_open() && loop->n_corrections != snap_seen) {  // map lock 아래라 보정 중간 상태는 안 보임
         snap_seen = loop->n_corrections;
         for (int f = 0; f <= k; ++f)
@@ -366,11 +396,21 @@ int main(int argc, char** argv) {
       if (viewer->closed()) break;
     }
 #endif
+    if (map_lock) map_lock.unlock();
+    {  // lock 을 놓은 뒤: 동기식 루프 (process 가 lock 을 잡음) 와 매핑 스레드를 같이 써도 교착 없음
+      const auto tl = Clock::now();
+      for (auto& [kf, img] : new_kfs) {
+        if (loop && !img.empty()) loop->push(kf, img);
+        if (mapper) mapper->push(kf);
+      }
+      t_loop += ms_since(tl);
+    }
     if (k % 100 == 0)
       std::printf("  frame %4d: %zu map pts, %zu map lines  (%.1f fps)\n", k, vo.map_p.size(), vo.map_l.size(),
                   (k + 1) / (ms_since(t_start) / 1000));
   }
   const double total = ms_since(t_start);
+  if (mapper) mapper->finish();
   if (loop) loop->finish();  // 남은 키프레임 처리 + 마지막 보정까지 반영한 뒤 궤적 저장
   int f0 = 0, n_ok = 0;  // 포즈가 처음 생긴 프레임부터 연속으로 포즈가 있는 프레임 수
   while (f0 < k && !vo.has_pose[f0]) ++f0;
@@ -390,10 +430,19 @@ int main(int argc, char** argv) {
                 "%d keyframes dropped (loop thread behind)\n",
                 lprm.threaded ? "thread" : "sync", loop->loops.size(), loop->n_queries,
                 loop->ms_detect / std::max(loop->n_queries, 1), loop->ms_pgo, loop->n_skipped);
-    std::printf("  PGO: %zu runs (%d loops already consistent -> skipped) | g2o optimize %.0f ms total (%.1f ms/run), "
-                "map write-back %.0f ms total\n", loop->loops.size() - loop->n_pgo_skipped, loop->n_pgo_skipped,
-                loop->ms_opt, loop->ms_opt / std::max<size_t>(loop->loops.size() - loop->n_pgo_skipped, 1),
-                loop->ms_blocked);
+    if (use_anchor)
+      std::printf("  depth prior: %d keyframes anchored, %d anchor PGO runs, %d skipped (scale already consistent)\n",
+                  loop->n_anchors, loop->n_anchor_pgo, loop->n_anchor_skip);
+    if (lprm.fuse)
+      std::printf("  loop fusion: %d map points fused with the old map, %d loop candidates excluded (already covisible)\n",
+                  loop->n_fused, loop->n_excluded);
+    if (lprm.consist_n > 1 || lprm.prune_ratio > 0)
+      std::printf("  loop robustness: %d detections not confirmed (consistency %d), %d loop edges pruned after PGO\n",
+                  loop->n_unconfirmed, lprm.consist_n, loop->n_pruned);
+    const int n_pgo = int(loop->loops.size()) - loop->n_pgo_skipped + loop->n_anchor_pgo;
+    std::printf("  PGO: %d runs (%d loops already consistent -> skipped) | g2o optimize %.0f ms total (%.1f ms/run), "
+                "map write-back %.0f ms total\n", n_pgo, loop->n_pgo_skipped, loop->ms_opt,
+                loop->ms_opt / std::max(n_pgo, 1), loop->ms_blocked);
     std::printf("  tracking stalled by loop closure: map lock held by loop thread %.0f ms total (max %.1f ms), "
                 "tracking waited %.1f ms/frame (max %.1f ms), in-thread loop work %.1f ms/frame\n",
                 loop->ms_blocked, loop->ms_blocked_max, t_wait / k, t_wait_max, t_loop / k);
@@ -404,6 +453,17 @@ int main(int argc, char** argv) {
                 vo.n_ba, vo.ba_ms / std::max(vo.n_ba, 1), vo.ba_ms / k, double(vo.ba_points) / std::max(vo.n_ba, 1),
                 double(vo.ba_outliers) / std::max(vo.n_ba, 1), vo.ba_rms_before / std::max(vo.n_ba, 1),
                 vo.ba_rms_after / std::max(vo.n_ba, 1));
+  if (mapper)
+    std::printf("  local BA (thread): %d runs (%d discarded after a map correction, %d queued keyframes merged), "
+                "solve %.1f ms/run, %.0f points/run, %.1f outliers/run, %.0f lines/run, RMS %.2f -> %.2f px | "
+                "map lock held %.0f ms total (max %.1f ms)\n",
+                mapper->n_ba, mapper->n_discarded, mapper->n_dropped, mapper->ms_solve / std::max(mapper->n_ba, 1),
+                double(mapper->points) / std::max(mapper->n_ba, 1), double(mapper->outliers) / std::max(mapper->n_ba, 1),
+                double(mapper->lines_used) / std::max(mapper->n_ba, 1), mapper->rms_before / std::max(mapper->n_ba, 1),
+                mapper->rms_after / std::max(mapper->n_ba, 1), mapper->ms_blocked, mapper->ms_blocked_max);
+  if (prm.local_ba && prm.ba_lines)
+    std::printf("  local BA lines: %.0f lines/run, %.1f outlier lines removed/run\n",
+                double(vo.ba_lines_used) / std::max(vo.n_ba, 1), double(vo.ba_line_outliers) / std::max(vo.n_ba, 1));
   if (prm.use_depth)
     std::printf("  depth: %.0f points/frame with valid depth -> %ld map points from depth\n", double(n_depth_obs) / k,
                 vo.n_depth_pts);

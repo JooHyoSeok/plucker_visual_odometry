@@ -248,7 +248,7 @@ void Viewer::run() {
   // 시작 화면: 체크박스 묶음을 서로 배타적으로 (Pangolin 에 콤보박스가 없음). Start 뒤에는 잠금
   using Box = std::unique_ptr<pangolin::Var<bool>>;
   const std::vector<std::string> PR{"thumb", "netvlad", "salad", "mast3r"}, VER{"orb", "mast3r", "orb+mast3r"};
-  Box start_btn, ui_loop, ui_lines;
+  Box start_btn, ui_loop, ui_lines, ui_depth;
   std::vector<Box> ui_pr, ui_ver;
   std::unique_ptr<pangolin::Var<std::string>> ui_state;
   int sel_pr = 0, sel_ver = 0;
@@ -265,6 +265,7 @@ void Viewer::run() {
       if (VER[i] == start_->ver) sel_ver = i;
     }
     ui_lines = std::make_unique<pangolin::Var<bool>>("menu.Track lines", start_->lines, true);
+    ui_depth = std::make_unique<pangolin::Var<bool>>("menu.Depth anchor DA3", start_->depth_prior, true);
   }
   auto exclusive = [&](std::vector<Box>& box, int& sel) {  // 클릭한 것 하나만 켜짐 (Start 뒤에는 클릭 무시)
     for (int i = 0; i < int(box.size()); ++i)
@@ -290,10 +291,10 @@ void Viewer::run() {
   while (!pangolin::ShouldQuit() && !quit_) {
     if (start_) {
       exclusive(ui_pr, sel_pr), exclusive(ui_ver, sel_ver);
-      if (started_) *ui_loop = start_->loop, *ui_lines = start_->lines;
+      if (started_) *ui_loop = start_->loop, *ui_lines = start_->lines, *ui_depth = start_->depth_prior;
       if (pangolin::Pushed(*start_btn) && !started_) {
         std::lock_guard<std::mutex> lk(mu_);
-        *start_ = RunOptions{bool(*ui_loop), PR[sel_pr], VER[sel_ver], bool(*ui_lines)};
+        *start_ = RunOptions{bool(*ui_loop), PR[sel_pr], VER[sel_ver], bool(*ui_lines), bool(*ui_depth)};
         started_ = true;
         *ui_state = start_->loop ? "running: " + start_->pr + " + " + start_->ver : "running: no loop";
         start_cv_.notify_all();

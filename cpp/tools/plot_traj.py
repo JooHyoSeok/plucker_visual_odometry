@@ -1,8 +1,10 @@
 """
 Top-view trajectories of benchmark.py runs, Sim(3)-aligned to GT (as for the ATE), one panel per sequence.
 
-usage: python3 plot_traj.py --out traj.png [--suite kitti] [--mode mono] [--seqs REGEX] [--title T] LABEL=DIR [...]
+usage: python3 plot_traj.py --out traj.png [--suite kitti] [--mode mono] [--seqs REGEX] [--title T] [--paper] LABEL=DIR [...]
   first LABEL=DIR is the reference (gray), the rest get categorical colors in fixed order; GT is drawn dark.
+  --paper: SLAM-paper style figure (white, serif, GT dashed black, start marker, x/z [m], shared legend,
+           per-panel ATE "first -> last run", † = tracked < 95 %); also writes a PDF next to the PNG.
   view: x (right) vs z (forward) of the GT world (KITTI: camera-0 frame, ICRA/ARKit: y is up)
 """
 import argparse
@@ -43,6 +45,57 @@ def aligned(job, d):
     return A, G, 100 * np.sqrt(((A - G) ** 2).sum(1).mean()) / max(path, 1e-9)
 
 
+def paper_figure(jobs, runs, out, title):
+    plt.rcParams.update({"font.family": "serif", "font.serif": ["Times New Roman", "Nimbus Roman", "DejaVu Serif"],
+                         "font.size": 9, "axes.edgecolor": "black", "axes.linewidth": 0.6, "xtick.direction": "in",
+                         "ytick.direction": "in", "figure.facecolor": "white", "axes.facecolor": "white"})
+    colors = ["#eb6834", "#2a78d6", "#1baf7a", "#eda100"]  # 검증된 팔레트 (orange = 이전, blue = 이후)
+    ncol = min(5, len(jobs))
+    nrow = (len(jobs) + ncol - 1) // ncol
+    fig, axes = plt.subplots(nrow, ncol, figsize=(3.3 * ncol, 3.2 * nrow + 0.6), squeeze=False)
+    for ax in axes.ravel():
+        ax.axis("off")
+    handles = {}
+    for ax, job in zip(axes.ravel(), jobs):
+        ax.axis("on")
+        G, ates = None, []
+        for (label, d), c in zip(runs, colors):
+            r = aligned(job, d)
+            if r is None:
+                ates.append("-")
+                continue
+            A, Gi, drift = r
+            if G is None or len(Gi) > len(G):
+                G = Gi
+            h, = ax.plot(A[:, 0], A[:, 2], color=c, linewidth=1.3, label=label)
+            handles.setdefault(label, h)
+            ate = drift / 100 * np.linalg.norm(np.diff(Gi, axis=0), axis=1).sum()
+            short = len(A) < 0.95 * len(np.loadtxt(job["gt"]).reshape(-1, 12)[job["start"]::job["stride"]])
+            ates.append(f"{ate:.1f}{'†' if short else ''}")
+        if G is not None:
+            g, = ax.plot(G[:, 0], G[:, 2], color="black", linewidth=0.9, linestyle=(0, (4, 2)), label="Ground truth", zorder=0)
+            st, = ax.plot(G[0, 0], G[0, 2], marker="s", color="black", markersize=5, linestyle="none", label="Start", zorder=5)
+            handles.setdefault("Ground truth", g), handles.setdefault("Start", st)
+        ax.set_aspect("equal", adjustable="datalim")
+        ax.grid(color="#d9d9d9", linewidth=0.4)
+        ax.set_xlabel("x [m]")
+        ax.set_ylabel("z [m]")
+        ax.set_title(f"Sequence {job['seq']}", fontsize=10)
+        ax.text(0.03, 0.97, "ATE [m]: " + " → ".join(ates), transform=ax.transAxes, va="top", fontsize=8,
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=1.5))
+    order = ["Ground truth"] + [l for l, _ in runs] + ["Start"]
+    fig.legend([handles[k] for k in order if k in handles], [k for k in order if k in handles], loc="upper center",
+               ncol=len(order), frameon=False, fontsize=9.5)
+    if title:
+        fig.suptitle(title, y=0.995, fontsize=11)
+    fig.text(0.005, 0.005, "Trajectories Sim(3)-aligned to ground truth (as for the ATE). "
+             "† tracked < 95 % of the sequence (ATE over the tracked part).", fontsize=8, va="bottom")
+    fig.tight_layout(rect=(0, 0.025, 1, 0.94 if not title else 0.92))
+    fig.savefig(out, dpi=200)
+    fig.savefig(Path(out).with_suffix(".pdf"))
+    print("saved", out, "and", Path(out).with_suffix(".pdf"))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
@@ -50,6 +103,7 @@ def main():
     ap.add_argument("--mode", default="mono")
     ap.add_argument("--seqs", default=".")
     ap.add_argument("--title", default="")
+    ap.add_argument("--paper", action="store_true")
     ap.add_argument("runs", nargs="+", help="LABEL=DIR")
     o = ap.parse_args()
     runs = [tuple(s.split("=", 1)) for s in o.runs]
@@ -57,6 +111,8 @@ def main():
         jobs = list(bm.kitti_jobs(o.seqs))
     else:  # GT already converted by benchmark.py into <dir>/gt
         jobs = [j for j in bm.icra_jobs(o.seqs, [o.mode], Path(runs[0][1])) if j["mode"] == o.mode]
+    if o.paper:
+        return paper_figure(jobs, runs, o.out, o.title)
     colors = [REF] + SERIES[: len(runs) - 1]
 
     ncol = min(4, len(jobs))
