@@ -1,0 +1,55 @@
+# Point + Plücker-line monocular VO with loop closure (KITTI)
+
+## Files
+| file | role |
+|---|---|
+| `vo_plucker.py` | geometry core: Plücker lines, triangulation, pose estimation, `run_vo` (also a synthetic-corridor demo when run directly) |
+| `vo_kitti.py` | real-data pipeline: KLT points + LSD lines frontend, VO, loop closure + Sim(3) PGO, evaluation |
+| `local_ba.py` | sliding-window BA (points + lines in orthonormal 4-DoF), enabled with `--ba` |
+| `loop_closure.py` | loop detection (thumbnail shortlist + ORB + F-RANSAC + 3D-3D Sim(3) RANSAC) and Sim(3) pose graph |
+| `make_video_kitti.py` | renders the result video from the run file |
+
+All five `.py` files must be in the same folder.
+
+## Setup
+```bash
+python3 -m pip install numpy scipy matplotlib opencv-python   # OpenCV >= 4.5.1 (needs LSD)
+# ffmpeg CLI is needed only for the video (macOS: brew install ffmpeg)
+```
+
+## Data
+Either the original KITTI odometry grayscale images + poses:
+```
+dataset/sequences/06/image_0/000000.png ...
+dataset/poses/06.txt
+```
+or the video version used here (KITTI 06 redistributed in the pyslam repo):
+```bash
+git clone --depth 1 --filter=blob:none --sparse https://github.com/luigifreda/pyslam.git data_dl/pyslam
+cd data_dl/pyslam && git sparse-checkout set data/videos/kitti06 && cd ../..
+```
+
+## Run
+```bash
+# default = data_dl/pyslam/data/videos/kitti06 (video.mp4 + 06.txt)
+python3 vo_kitti.py
+python3 make_video_kitti.py
+
+# original KITTI images (image sequence pattern works directly)
+python3 vo_kitti.py --video dataset/sequences/06/image_0/%06d.png \
+                    --gt dataset/poses/06.txt \
+                    --calib 707.0912,707.0912,601.8873,183.1104
+python3 make_video_kitti.py --video dataset/sequences/06/image_0/%06d.png --gt dataset/poses/06.txt
+```
+Options for `vo_kitti.py`
+- first positional number: use only the first N frames (e.g. `python3 vo_kitti.py 300`)
+- `--ba`: turn on local BA (outputs `kitti06_run_ba.pkl` / `kitti06_result_ba.png`; pass `--ba` to the video script too)
+- `--calib fx,fy,cx,cy`: KITTI 00-02 `718.856,718.856,607.1928,185.2157`, 03 `721.5377,721.5377,609.5593,172.854`, 04-12 `707.0912,707.0912,601.8873,183.1104`
+
+Outputs: `kitti06_result.png` (trajectory + error), `kitti06_run.pkl` (all results), `kitti06_vo.mp4` (video).
+Runtime for the full 1101-frame sequence: about 6-8 min (+ about 10 min more with `--ba`).
+
+## Notes
+- GT is used only for evaluation (origin-anchored alignment: same start pose, scale fitted on the first 50 frames), never for tracking or loop detection.
+- Inputs must be rectified (no lens distortion). For other datasets, convert GT to KITTI format (one 3x4 `T_w_c` per line, 12 numbers).
+- Tuning knobs: `vo_kitti.py` (frontend: `MAX_PTS`, `MAX_LINES`, `MIN_LINE_LEN`), `loop_closure.py` (`MIN_GAP`, `SHORTLIST`, `MIN_SIM3_INLIERS`, PGO weights `W_ODOM`, `W_LOOP`), `local_ba.py` (`WINDOW`, `EXTRA_FIXED`).
