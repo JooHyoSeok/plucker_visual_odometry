@@ -51,6 +51,7 @@ struct TrackerParams {
   int kf_max_gap = 8;         // 키프레임 최대 간격 [frames] (parallax 2 px 이상일 때)
   bool use_depth = false;     // FrameObs::depth 사용 (깊이 초기화 + 깊이 맵 점)
   bool depth_6dof = true;     // use_depth일 때 2D-2D 대신 맵 기준 6-DoF로 추적
+  bool pose_g2o = false;      // 6-DoF 추정을 g2o motion-only BA로 (점만, 선 edge는 다음 단계). false = 자체 LM (점+선)
 };
 
 class VOTracker {

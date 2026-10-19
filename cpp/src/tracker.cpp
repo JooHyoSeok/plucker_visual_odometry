@@ -1,5 +1,7 @@
 #include "vo_plucker/tracker.h"
 
+#include "vo_plucker/optimizer.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -262,7 +264,7 @@ bool VOTracker::track(int k) {
     if (weak) rit = rel.end(), ++n_map6dof;
   }
   auto solve = [&](const MapObs& mm, const Pose& pi) {
-    if (rit == rel.end()) return estimate_pose(cam, pi, mm);
+    if (rit == rel.end()) return prm.pose_g2o ? motion_only_ba(cam, pi, mm) : estimate_pose(cam, pi, mm);
     const Pose& rr = rit->second;
     const Mat3 Rk = rr.R * poses[k - 1].R;
     const Vec3 base = rr.R * poses[k - 1].t;

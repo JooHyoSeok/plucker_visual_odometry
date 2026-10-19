@@ -1,0 +1,4 @@
+[submodule "cpp/third_party/g2o"]
+	path = cpp/third_party/g2o
+	url = https://github.com/RainerKuemmerle/g2o.git
+	shallow = true
