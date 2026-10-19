@@ -109,7 +109,7 @@ std::vector<int> VOTracker::add(FrameObs o, const std::optional<Pose>& r, const 
 void VOTracker::reset_init() {
   map_p.clear(), map_l.clear(), mature_p.clear(), mature_l.clear(), kfs.clear();
   std::fill(has_pose.begin(), has_pose.end(), 0);
-  init_frame_ = failed_at = -1, fail_reason.clear(), line_rejected = n_still = 0;
+  init_frame_ = failed_at = -1, fail_reason.clear(), line_rejected = n_still = n_map6dof = 0;
 }
 
 void VOTracker::update_map(int k) {
@@ -216,7 +216,24 @@ bool VOTracker::track(int k) {
     }
   }
 
-  const auto rit = rel.find(k);
+  auto rit = rel.find(k);
+  if (rit != rel.end()) {
+    bool weak = prm.catchup_6dof && k < init_frame_;  // 초기화 사이 프레임: 맵(0, I baseline)이 2D-2D보다 확실함
+    if (!weak && prm.rel_min_px > 0) {  // 2D-2D 회전으로 보정한 맵 점 트랙 flow가 작으면 이동 방향이 노이즈
+      const Mat3 H = cam.K * rit->second.R * cam.Kinv;
+      std::vector<double> d;
+      for (size_t i = 0; i < pid.size(); ++i)
+        if (const Vec2* u = obs[k - 1].point(pid[i])) {
+          const Vec3 q = H * Vec3((*u)(0), (*u)(1), 1.0);
+          d.push_back((q.head<2>() / q(2) - m.uv[i]).norm());
+        }
+      if (d.size() >= 20) {
+        std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
+        weak = d[d.size() / 2] < prm.rel_min_px;
+      }
+    }
+    if (weak) rit = rel.end(), ++n_map6dof;
+  }
   auto solve = [&](const MapObs& mm, const Pose& pi) {
     if (rit == rel.end()) return estimate_pose(cam, pi, mm);
     const Pose& rr = rit->second;

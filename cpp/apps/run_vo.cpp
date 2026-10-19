@@ -100,6 +100,7 @@ int main(int argc, char** argv) {
   TrackerParams prm;
   prm.use_lines = !flag(argc, argv, "--no-lines");
   prm.kf_mapping = flag(argc, argv, "--kf-mapping");
+  prm.rel_min_px = std::atof(arg(argc, argv, "--rel-min-px", "0"));
   // 초기화: --init-frame N이면 그 프레임, 아니면 frame 0 대비 픽셀 이동 중앙값이 --init-px 이상이 될 때 (07처럼 천천히 출발해도)
   const int init_fixed = std::atoi(arg(argc, argv, "--init-frame", "0"));
   const double init_px = std::atof(arg(argc, argv, "--init-px", "20"));  // 이 이상이면 초기화 시도, 품질이 안 되면 다음 프레임 재시도
@@ -184,7 +185,8 @@ int main(int argc, char** argv) {
               vo.failed_at >= 0 ? (" | FAILED at " + std::to_string(vo.failed_at) + ": " + vo.fail_reason).c_str() : "",
               k / (total / 1000),
               total / k);
-  std::printf("  keyframes %zu | stationary frames %d | mapping %s\n", vo.kfs.size(), vo.n_still,
+  std::printf("  keyframes %zu | stationary frames %d | low-parallax frames solved 6-DoF on map %d | mapping %s\n",
+              vo.kfs.size(), vo.n_still, vo.n_map6dof,
               prm.kf_mapping ? "keyframes" : "every frame");
   std::printf("  map points re-attached after track loss: %ld (%.1f / frame) | dynamic tracks dropped: %ld (%.1f / frame)\n",
               n_reattach, double(n_reattach) / k, n_dynamic, double(n_dynamic) / k);

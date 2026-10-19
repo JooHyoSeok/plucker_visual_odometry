@@ -36,6 +36,11 @@ struct TrackerParams {
   double outlier_px = 6.0;    // 포즈 추정 후 이보다 큰 재투영 오차 랜드마크는 맵에서 제거
   bool use_lines = true;
   double still_px = 0.5;      // 맵 점 트랙 flow 중앙값이 이보다 작으면 정지 (0 = 끔)
+  // 초기화 직후 0..I 사이 프레임은 맵(frame 0, I로 삼각측량) 기준 6-DoF로 추정: 느린 출발에서 2D-2D 이동 방향이
+  // 노이즈가 되는 문제 (KITTI 07 시작). false = 2D-2D (Python과 동일)
+  bool catchup_6dof = true;
+  // 그 밖의 프레임도 회전 보정 flow 중앙값이 이보다 작으면 6-DoF (0 = 끔. 10이면 KITTI 06에서 yaw 편향으로 나빠짐)
+  double rel_min_px = 0;
   int init_min_points = 100;  // 초기화 직후 삼각측량된 맵 점이 이보다 적거나 1..I-1 추적이 실패하면 초기화 취소 (다음 프레임에 재시도)
   bool kf_mapping = false;    // true: 키프레임에서만 매핑 (KITTI 06에서 오히려 나빠짐), false: 매 프레임 (Python과 동일)
   double kf_parallax_px = 10; // 직전 키프레임 대비 회전 보정 parallax 중앙값이 이 이상이면 키프레임
@@ -70,6 +75,7 @@ class VOTracker {
   std::unordered_map<int, Pose> rel;
   std::vector<int> kfs;  // 키프레임 번호 (오름차순)
   int n_still = 0;       // 정지로 판정한 프레임 수
+  int n_map6dof = 0;     // parallax가 작아서 맵 기준 6-DoF로 추정한 프레임 수
   int failed_at = -1;  // tracking 실패 프레임 (-1 = 정상), 실패 후에는 추적 안 함 (relocalization 없음)
   std::string fail_reason;
   int line_rejected = 0;
