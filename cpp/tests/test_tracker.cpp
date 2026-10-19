@@ -3,20 +3,10 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
-#include <sstream>
-#include <string>
 
-#include "vo_plucker/tracker.h"
+#include "obs_io.h"
 
 using namespace vp;
-
-static Pose read_pose(std::istringstream& ss) {
-  Pose p;
-  for (int i = 0; i < 9; ++i) ss >> p.R(i / 3, i % 3);
-  for (int i = 0; i < 3; ++i) ss >> p.t(i);
-  return p;
-}
 
 int main(int argc, char** argv) {
   if (argc < 2) {
@@ -26,44 +16,9 @@ int main(int argc, char** argv) {
   const std::string dir = argv[1];
   TrackerParams prm;
   prm.use_lines = !(argc > 2 && std::strcmp(argv[2], "--no-lines") == 0);
-
-  // ---- read obs ----
-  std::ifstream fo(dir + "/obs.txt");
-  std::string line, tag;
   Camera cam;
-  struct Rec {
-    FrameObs o;
-    std::optional<Pose> rel, init;
-  };
-  std::vector<Rec> recs;
-  while (std::getline(fo, line)) {
-    std::istringstream ss(line);
-    ss >> tag;
-    if (tag == "camera") {
-      double fx, fy, cx, cy;
-      int W, H;
-      ss >> fx >> fy >> cx >> cy >> W >> H;
-      cam = Camera(fx, fy, cx, cy, W, H);
-    } else if (tag == "frame") {
-      recs.emplace_back();
-    } else if (tag == "p") {
-      int j;
-      Vec2 u;
-      ss >> j >> u(0) >> u(1);
-      recs.back().o.pid.push_back(j), recs.back().o.uv.push_back(u);
-    } else if (tag == "l") {
-      int j;
-      Vec4 s;
-      ss >> j >> s(0) >> s(1) >> s(2) >> s(3);
-      recs.back().o.lid.push_back(j), recs.back().o.seg.push_back(s);
-    } else if (tag == "rel") {
-      recs.back().rel = read_pose(ss);
-    } else if (tag == "init") {
-      recs.back().init = read_pose(ss);
-    }
-  }
+  std::vector<ObsRecord> recs = read_obs(dir + "/obs.txt", cam);
 
-  // ---- run ----
   VOTracker vo(cam, prm);
   const auto t0 = std::chrono::steady_clock::now();
   for (auto& r : recs) vo.add(std::move(r.o), r.rel, r.init);
@@ -71,6 +26,7 @@ int main(int argc, char** argv) {
 
   // ---- compare ----
   std::ifstream fr(dir + "/ref_poses.txt");
+  std::string line;
   int n = 0, mismatch_has = 0, first_bad = -1;
   double max_dR = 0, max_dt = 0, path = 0;
   Vec3 C_prev = Vec3::Zero();

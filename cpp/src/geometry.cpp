@@ -161,6 +161,36 @@ std::vector<int> pick_frames(const std::vector<int>& frames, int k_max) {
   return out;
 }
 
+VecX sampson(const Mat3& R, const Vec3& t, const std::vector<Vec2>& x1, const std::vector<Vec2>& x2, double fx) {
+  const Mat3 E = skew(t) * R;
+  VecX r(x1.size());
+  for (size_t i = 0; i < x1.size(); ++i) {
+    const Vec3 a(x1[i](0), x1[i](1), 1.0), b(x2[i](0), x2[i](1), 1.0);
+    const Vec3 Ea = E * a, Eb = E.transpose() * b;
+    r(i) = b.dot(Ea) / std::sqrt(Ea(0) * Ea(0) + Ea(1) * Ea(1) + Eb(0) * Eb(0) + Eb(1) * Eb(1)) * fx;
+  }
+  return r;
+}
+
+Pose refine_relative_pose(Pose p, const std::vector<Vec2>& x1, const std::vector<Vec2>& x2, double fx, int iters) {
+  // Gauss-Newton on Sampson error, 수치 Jacobian. damping 1e-3: |t|=1 gauge 방향 처리
+  Eigen::Matrix<double, Eigen::Dynamic, 6> J(x1.size(), 6);
+  for (int it = 0; it < iters; ++it) {
+    const VecX r = sampson(p.R, p.t, x1, x2, fx);
+    for (int i = 0; i < 6; ++i) {
+      Vec6 d = Vec6::Zero();
+      d(i) = 1e-7;
+      const Vec3 t2 = p.t + d.tail<3>();
+      J.col(i) = (sampson(so3_exp(d.head<3>()) * p.R, t2 / t2.norm(), x1, x2, fx) - r) / 1e-7;
+    }
+    const Eigen::Matrix<double, 6, 6> A = J.transpose() * J + 1e-3 * Eigen::Matrix<double, 6, 6>::Identity();
+    const Vec6 dx = -A.partialPivLu().solve(J.transpose() * r);
+    p.R = so3_exp(dx.head<3>()) * p.R;
+    p.t = (p.t + dx.tail<3>()).normalized();
+  }
+  return p;
+}
+
 VecX residuals(const Camera& c, const Pose& p, const MapObs& m) {
   const int np_ = m.X.size(), nl = m.L.size();
   VecX r(2 * np_ + 2 * nl);

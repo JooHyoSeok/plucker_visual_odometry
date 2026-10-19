@@ -51,6 +51,11 @@ bool line_ok(const Camera& c, const std::optional<Line>& L, const std::vector<Po
              const std::vector<Vec4>& segs, double line_min_deg);
 std::vector<int> pick_frames(const std::vector<int>& frames, int k_max = 12);
 
+// 2D-2D (normalized coords x2^T E x1 = 0): Sampson error [≈px, scaled by fx], 5-DoF refinement of (R, t/|t|)
+VecX sampson(const Mat3& R, const Vec3& t, const std::vector<Vec2>& x1, const std::vector<Vec2>& x2, double fx);
+Pose refine_relative_pose(Pose p, const std::vector<Vec2>& x1, const std::vector<Vec2>& x2, double fx,
+                          int iters = 30);
+
 // pose estimation against the map (points + lines)
 struct MapObs {
   std::vector<Vec3> X;

@@ -9,11 +9,17 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc video calib3d videoio imgcodecs)
 
-add_library(vo_plucker src/geometry.cpp src/tracker.cpp)
-target_include_directories(vo_plucker PUBLIC include)
-target_link_libraries(vo_plucker PUBLIC Eigen3::Eigen)
+add_library(vo_plucker src/geometry.cpp src/tracker.cpp src/frontend.cpp)
+target_include_directories(vo_plucker PUBLIC include ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(vo_plucker PUBLIC Eigen3::Eigen ${OpenCV_LIBS})
 target_compile_options(vo_plucker PRIVATE -Wall -Wextra)
+
+add_executable(run_vo apps/run_vo.cpp)
+target_link_libraries(run_vo vo_plucker)
 
 add_executable(test_tracker tests/test_tracker.cpp)
 target_link_libraries(test_tracker vo_plucker)
+add_executable(test_frontend tests/test_frontend.cpp)
+target_link_libraries(test_frontend vo_plucker)
