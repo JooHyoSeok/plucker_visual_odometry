@@ -49,6 +49,14 @@ def umeyama_sim3(A, B):
 
 
 # ---------------- features ----------------
+def frame_features(orb, g):
+    """grayscale 키프레임 -> ORB + 정규화 썸네일(전역 디스크립터)"""
+    kp, des = orb.detectAndCompute(g, None)
+    th = cv2.resize(g, (64, 20), interpolation=cv2.INTER_AREA).astype(np.float32).ravel()
+    th = (th - th.mean()) / (th.std() + 1e-6)
+    return dict(pts=np.array([p.pt for p in kp]), des=des, thumb=th / np.sqrt(len(th)))
+
+
 def keyframe_features(video_path, kf_frames):
     orb = cv2.ORB_create(1500, fastThreshold=10)
     want = set(kf_frames)
@@ -60,11 +68,7 @@ def keyframe_features(video_path, kf_frames):
         if not ok:
             break
         if k in want:
-            g = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
-            kp, des = orb.detectAndCompute(g, None)
-            th = cv2.resize(g, (64, 20), interpolation=cv2.INTER_AREA).astype(np.float32).ravel()
-            th = (th - th.mean()) / (th.std() + 1e-6)
-            feats[k] = dict(pts=np.array([p.pt for p in kp]), des=des, thumb=th / np.sqrt(len(th)))
+            feats[k] = frame_features(orb, cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY))
         k += 1
     return feats
 

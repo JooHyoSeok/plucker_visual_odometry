@@ -448,80 +448,117 @@ def estimate_scale(Rk, base, that, s0, X, uv, L, seg, iters=30, huber=3.0):
 # ============================================================
 # 7. VO 메인 루프
 # ============================================================
-def run_vo(obs, use_lines, history=None, init_pose=None, rel_pose=None, post_frame_hook=None):
-    """history(dict)를 넘기면 프레임별 (R, t, 그 프레임에 보이는 랜드마크)를 저장 -> 영상용
-    init_pose=(R, t)를 넘기면 내장 8-point 초기화 대신 사용 (실데이터: RANSAC 결과)
-    rel_pose={k: (R_rel, t_dir)}를 넘기면 회전/방향은 그 값(2D-2D)을 쓰고 맵으로는 스케일 1개만 푼다
-    post_frame_hook(k, ctx)를 넘기면 매 프레임 매핑 후 호출 (local BA 등). ctx의 Rs/ts/map은 제자리 수정 가능"""
-    N = len(obs)
-    Rs, ts = [None] * N, [None] * N
-    first_p, first_l = {}, {}
-    for k, (op, ol) in enumerate(obs):
+class VOTracker:
+    """프레임 단위 VO: add(op, ol)로 관측을 하나씩 넣는다 (run_vo는 obs 리스트를 순서대로 넣는 래퍼).
+    frame 1..INIT_FRAME-1은 버퍼링만 하고, INIT_FRAME이 들어오면 초기화한 뒤 1..INIT_FRAME-1을 몰아서 추적.
+    tracking 실패 후에는 관측만 쌓고 포즈는 None (relocalization 없음).
+    Rs/ts/map_p/map_l은 바깥(local BA hook, 루프 보정)에서 제자리 수정 가능 -> 다음 프레임 추적에 그대로 반영"""
+
+    def __init__(self, use_lines, history=None, post_frame_hook=None):
+        self.use_lines, self.history, self.hook = use_lines, history, post_frame_hook
+        self.obs, self.Rs, self.ts = [], [], []
+        self.first_p, self.first_l = {}, {}
+        self.rel = {}
+        self.map_p, self.map_l = {}, {}
+        self.mature_p, self.mature_l = set(), set()
+        self.stats = {"line_rejected": 0, "failed_at": None}
+        self.ctx = dict(Rs=self.Rs, ts=self.ts, obs=self.obs, map_p=self.map_p, map_l=self.map_l,
+                        mature_p=self.mature_p, mature_l=self.mature_l, use_lines=use_lines)
+
+    def add(self, op, ol, rel=None, init_pose=None):
+        """rel = (R_rel, t방향) k-1 -> k (2D-2D, 주면 회전/방향은 이걸 쓰고 맵으로는 스케일만 푼다)
+        init_pose = (R, t) frame 0 -> INIT_FRAME (k == INIT_FRAME일 때만 사용, None이면 8-point)
+        반환: 이번 호출에서 포즈가 정해진 프레임 번호 리스트"""
+        k = len(self.obs)
+        self.obs.append((op, ol))
+        self.Rs.append(None)
+        self.ts.append(None)
         for j in op:
-            first_p.setdefault(j, k)
+            self.first_p.setdefault(j, k)
         for j in ol:
-            first_l.setdefault(j, k)
+            self.first_l.setdefault(j, k)
+        if rel is not None:
+            self.rel[k] = rel
+        if self.stats["failed_at"] is not None or k < INIT_FRAME:
+            return []
+        if k > INIT_FRAME:
+            return [k] if self._track(k) else []
+        self._init(init_pose)
+        done = [0, INIT_FRAME]
+        for f in range(1, INIT_FRAME):
+            if not self._track(f):
+                break
+            done.append(f)
+        return done
 
-    # --- init: frame 0 & INIT_FRAME ---
-    op0, opI = obs[0][0], obs[INIT_FRAME][0]
-    ids = sorted(set(op0) & set(opI))
-    x1 = np.array([(Kinv @ [*op0[j], 1.0])[:2] for j in ids])
-    x2 = np.array([(Kinv @ [*opI[j], 1.0])[:2] for j in ids])
-    if init_pose is None:
-        R, t = decompose_E(eight_point_normalized(x1, x2), x1, x2)
-        R, t = refine_relative_pose(R, t, x1, x2)
-    else:
-        R, t = init_pose
-    Rs[0], ts[0] = np.eye(3), np.zeros(3)
-    Rs[INIT_FRAME], ts[INIT_FRAME] = R, t / np.linalg.norm(t)
+    def _record(self, k):
+        if self.hook is not None:
+            self.hook(k, self.ctx)
+        if self.history is not None:
+            op, ol = self.obs[k]
+            self.history[k] = (self.Rs[k], self.ts[k], {j: self.map_p[j] for j in op if j in self.map_p},   # 이 프레임에 보이는 것만
+                               {j: self.map_l[j] for j in ol if j in self.map_l})
 
-    map_p, map_l = {}, {}
-    mature_p, mature_l = set(), set()
-    stats = {"line_rejected": 0, "failed_at": None}
+    def _init(self, init_pose):
+        """frame 0 & INIT_FRAME"""
+        if init_pose is None:
+            op0, opI = self.obs[0][0], self.obs[INIT_FRAME][0]
+            ids = sorted(set(op0) & set(opI))
+            x1 = np.array([(Kinv @ [*op0[j], 1.0])[:2] for j in ids])
+            x2 = np.array([(Kinv @ [*opI[j], 1.0])[:2] for j in ids])
+            R, t = decompose_E(eight_point_normalized(x1, x2), x1, x2)
+            R, t = refine_relative_pose(R, t, x1, x2)
+        else:
+            R, t = init_pose
+        self.Rs[0], self.ts[0] = np.eye(3), np.zeros(3)
+        self.Rs[INIT_FRAME], self.ts[INIT_FRAME] = R, t / np.linalg.norm(t)
+        self._update_map(INIT_FRAME)
+        if self.hook is not None:
+            self.hook(0, self.ctx)
+            self.hook(INIT_FRAME, self.ctx)
+        if self.history is not None:
+            for f in (0, INIT_FRAME):
+                op, ol = self.obs[f]
+                self.history[f] = (self.Rs[f], self.ts[f], {j: self.map_p[j] for j in op if j in self.map_p},
+                                   {j: self.map_l[j] for j in ol if j in self.map_l})
 
-    def update_map(k):
+    def _update_map(self, k):
         """보이는 랜드마크를 지금까지의 모든 관측(포즈 아는 프레임)으로 다시 삼각측량.
         BA 대신 structure-only 정제. 처음 만들 때는 baseline(TRI_GAP)을 요구."""
+        obs, Rs, ts, map_p, map_l = self.obs, self.Rs, self.ts, self.map_p, self.map_l
         op, ol = obs[k]
         for j in op:
-            if k - first_p[j] < TRI_GAP or j in mature_p:
+            if k - self.first_p[j] < TRI_GAP or j in self.mature_p:
                 continue
-            fr = pick_frames([f for f in range(first_p[j], k + 1) if Rs[f] is not None and j in obs[f][0]])
+            fr = pick_frames([f for f in range(self.first_p[j], k + 1) if Rs[f] is not None and j in obs[f][0]])
             Rl, tl, uvs = [Rs[f] for f in fr], [ts[f] for f in fr], [obs[f][0][j] for f in fr]
             X = tri_point_multi(Rl, tl, uvs)
             if point_ok(X, Rl, tl, uvs):
                 map_p[j] = X
                 if parallax_deg(X, Rl[0], tl[0], Rl[-1], tl[-1]) > MATURE_DEG:
-                    mature_p.add(j)
-        if not use_lines:
+                    self.mature_p.add(j)
+        if not self.use_lines:
             return
         for j in ol:
-            if k - first_l[j] < TRI_GAP or j in mature_l:
+            if k - self.first_l[j] < TRI_GAP or j in self.mature_l:
                 continue
-            fr = pick_frames([f for f in range(first_l[j], k + 1) if Rs[f] is not None and j in obs[f][1]])
+            fr = pick_frames([f for f in range(self.first_l[j], k + 1) if Rs[f] is not None and j in obs[f][1]])
             Rl, tl, sgs = [Rs[f] for f in fr], [ts[f] for f in fr], [obs[f][1][j] for f in fr]
             Lj = tri_line_multi(Rl, tl, sgs)
             if line_ok(Lj, Rl, tl, sgs):
                 map_l[j] = Lj
                 if plane_angle_deg(Rl[0], tl[0], sgs[0], Rl[-1], tl[-1], sgs[-1]) > MATURE_DEG:
-                    mature_l.add(j)
+                    self.mature_l.add(j)
             elif j not in map_l:
-                stats["line_rejected"] += 1
+                self.stats["line_rejected"] += 1
 
-    update_map(INIT_FRAME)
-    ctx = dict(Rs=Rs, ts=ts, obs=obs, map_p=map_p, map_l=map_l, mature_p=mature_p, mature_l=mature_l,
-               use_lines=use_lines)
-    if post_frame_hook is not None:
-        post_frame_hook(0, ctx)
-        post_frame_hook(INIT_FRAME, ctx)
-    if history is not None:
-        for f in (0, INIT_FRAME):
-            history[f] = (Rs[f], ts[f], {j: map_p[j] for j in obs[f][0] if j in map_p},
-                          {j: map_l[j] for j in obs[f][1] if j in map_l})
+    def _fail(self, k):
+        self.stats["failed_at"] = k
+        return False
 
-    for k in range(1, N):
-        if k == INIT_FRAME:
-            continue
+    def _track(self, k):
+        """프레임 k 포즈 추정 + 매핑. 실패하면 False (이후 프레임은 추적 안 함)"""
+        obs, Rs, ts, map_p, map_l = self.obs, self.Rs, self.ts, self.map_p, self.map_l
         # constant-velocity prediction
         if k >= 2:
             dR = Rs[k - 1] @ Rs[k - 2].T
@@ -532,7 +569,7 @@ def run_vo(obs, use_lines, history=None, init_pose=None, rel_pose=None, post_fra
 
         op, ol = obs[k]
         pid = [j for j in op if j in map_p]
-        lid = [j for j in ol if j in map_l] if use_lines else []
+        lid = [j for j in ol if j in map_l] if self.use_lines else []
         X = np.array([map_p[j] for j in pid]).reshape(-1, 3)
         uv = np.array([op[j] for j in pid]).reshape(-1, 2)
         Lm = np.array([map_l[j] for j in lid]).reshape(-1, 6)
@@ -547,46 +584,51 @@ def run_vo(obs, use_lines, history=None, init_pose=None, rel_pose=None, post_fra
                 epi = (Rs[k - 1], ts[k - 1], x1, x2)
 
         if 2 * (len(pid) + len(lid)) < 12:     # 대응점 부족 -> tracking lost
-            stats["failed_at"] = k
-            break
-        else:
-            def solve(X, uv, Lm, sg, Ri, ti):
-                if rel_pose is not None and k in rel_pose:
-                    Rr, th = rel_pose[k]
-                    Rk, base = Rr @ Rs[k - 1], Rr @ ts[k - 1]
-                    sc = estimate_scale(Rk, base, th, max((ti - base) @ th, 1e-3), X, uv, Lm, sg)
-                    return Rk, base + sc * th
-                return estimate_pose(Ri, ti, X, uv, Lm, sg, epi=epi)
+            return self._fail(k)
 
-            R1, t1 = solve(X, uv, Lm, sg, R0, t0)
-            # outlier culling: 이 프레임에서 크게 안 맞는 랜드마크는 맵에서 빼고(다시 삼각측량 대상) 포즈 재추정
-            r = residuals(R1, t1, X, uv, Lm, sg)
-            rp = np.linalg.norm(r[:2 * len(pid)].reshape(-1, 2), axis=1)
-            rl = np.abs(r[2 * len(pid):].reshape(-1, 2)).max(1) if len(lid) else np.zeros(0)
-            keep_p, keep_l = rp < OUTLIER_PX, rl < OUTLIER_PX
-            for j in np.array(pid)[~keep_p]:
-                map_p.pop(j); mature_p.discard(j)
-            for j in np.array(lid, dtype=int)[~keep_l]:
-                map_l.pop(j); mature_l.discard(j)
-            if keep_p.sum() + keep_l.sum() < 6:      # 맵이 거의 다 안 맞음 -> 실패
-                stats["failed_at"] = k
-                break
-            if (~keep_p).any() or (~keep_l).any():
-                X, uv, Lm, sg = X[keep_p], uv[keep_p], Lm[keep_l], sg[keep_l]
-                R1, t1 = solve(X, uv, Lm, sg, R1, t1)
-            r = residuals(R1, t1, X, uv, Lm, sg)
-            if not np.all(np.isfinite(r)) or np.median(np.abs(r)) > 3.0 * PIX_NOISE:
-                stats["failed_at"] = k          # tracking failure -> 여기서 멈춤 (relocalization 없음)
-                break
-            Rs[k], ts[k] = orthonormalize(R1), t1
-        update_map(k)
-        if post_frame_hook is not None:
-            post_frame_hook(k, ctx)
-        if history is not None:
-            history[k] = (Rs[k], ts[k], {j: map_p[j] for j in op if j in map_p},   # 이 프레임에 보이는 것만
-                          {j: map_l[j] for j in ol if j in map_l})
+        def solve(X, uv, Lm, sg, Ri, ti):
+            if k in self.rel:
+                Rr, th = self.rel[k]
+                Rk, base = Rr @ Rs[k - 1], Rr @ ts[k - 1]
+                sc = estimate_scale(Rk, base, th, max((ti - base) @ th, 1e-3), X, uv, Lm, sg)
+                return Rk, base + sc * th
+            return estimate_pose(Ri, ti, X, uv, Lm, sg, epi=epi)
 
-    return Rs, ts, map_p, map_l, stats
+        R1, t1 = solve(X, uv, Lm, sg, R0, t0)
+        # outlier culling: 이 프레임에서 크게 안 맞는 랜드마크는 맵에서 빼고(다시 삼각측량 대상) 포즈 재추정
+        r = residuals(R1, t1, X, uv, Lm, sg)
+        rp = np.linalg.norm(r[:2 * len(pid)].reshape(-1, 2), axis=1)
+        rl = np.abs(r[2 * len(pid):].reshape(-1, 2)).max(1) if len(lid) else np.zeros(0)
+        keep_p, keep_l = rp < OUTLIER_PX, rl < OUTLIER_PX
+        for j in np.array(pid)[~keep_p]:
+            map_p.pop(j); self.mature_p.discard(j)
+        for j in np.array(lid, dtype=int)[~keep_l]:
+            map_l.pop(j); self.mature_l.discard(j)
+        if keep_p.sum() + keep_l.sum() < 6:      # 맵이 거의 다 안 맞음 -> 실패
+            return self._fail(k)
+        if (~keep_p).any() or (~keep_l).any():
+            X, uv, Lm, sg = X[keep_p], uv[keep_p], Lm[keep_l], sg[keep_l]
+            R1, t1 = solve(X, uv, Lm, sg, R1, t1)
+        r = residuals(R1, t1, X, uv, Lm, sg)
+        if not np.all(np.isfinite(r)) or np.median(np.abs(r)) > 3.0 * PIX_NOISE:
+            return self._fail(k)                # tracking failure -> 여기서 멈춤 (relocalization 없음)
+        Rs[k], ts[k] = orthonormalize(R1), t1
+        self._update_map(k)
+        self._record(k)
+        return True
+
+
+def run_vo(obs, use_lines, history=None, init_pose=None, rel_pose=None, post_frame_hook=None):
+    """배치 래퍼: VOTracker에 obs를 순서대로 넣는다.
+    history(dict)를 넘기면 프레임별 (R, t, 그 프레임에 보이는 랜드마크)를 저장 -> 영상용
+    init_pose=(R, t)를 넘기면 내장 8-point 초기화 대신 사용 (실데이터: RANSAC 결과)
+    rel_pose={k: (R_rel, t_dir)}를 넘기면 회전/방향은 그 값(2D-2D)을 쓰고 맵으로는 스케일 1개만 푼다
+    post_frame_hook(k, ctx)를 넘기면 매 프레임 매핑 후 호출 (local BA 등). ctx의 Rs/ts/map은 제자리 수정 가능"""
+    vo = VOTracker(use_lines, history, post_frame_hook)
+    for k, (op, ol) in enumerate(obs):
+        vo.add(op, ol, rel=None if rel_pose is None else rel_pose.get(k),
+               init_pose=init_pose if k == INIT_FRAME else None)
+    return vo.Rs, vo.ts, vo.map_p, vo.map_l, vo.stats
 
 
 # ============================================================

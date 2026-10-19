@@ -3,13 +3,15 @@
 ## Files
 | file | role |
 |---|---|
-| `vo_plucker.py` | geometry core: Plücker lines, triangulation, pose estimation, `run_vo` (also a synthetic-corridor demo when run directly) |
-| `vo_kitti.py` | real-data pipeline: KLT points + LSD lines frontend, VO, loop closure + Sim(3) PGO, evaluation |
+| `vo_plucker.py` | geometry core: Plücker lines, triangulation, pose estimation, frame-by-frame `VOTracker` (`run_vo` = batch wrapper; also a synthetic-corridor demo when run directly) |
+| `frontend.py` | real-data frontend, one frame at a time: KLT points + LSD lines, 2D-2D init / relative pose, camera setup |
+| `slam_online.py` | **online SLAM**: `OnlineSLAM.track(img) -> pose`; loop closure + Sim(3) PGO corrects the map and tracking continues on it; live view / video |
+| `vo_kitti.py` | batch pipeline (offline): frontend over all frames, VO, loop closure + Sim(3) PGO, evaluation |
 | `local_ba.py` | sliding-window BA (points + lines in orthonormal 4-DoF), enabled with `--ba` |
 | `loop_closure.py` | loop detection (thumbnail shortlist + ORB + F-RANSAC + 3D-3D Sim(3) RANSAC) and Sim(3) pose graph |
 | `make_video_kitti.py` | renders the result video from the run file |
 
-All five `.py` files must be in the same folder.
+All `.py` files must be in the same folder.
 
 ## Setup
 ```bash
@@ -29,7 +31,23 @@ git clone --depth 1 --filter=blob:none --sparse https://github.com/luigifreda/py
 cd data_dl/pyslam && git sparse-checkout set data/videos/kitti06 && cd ../..
 ```
 
-## Run
+## Run (online)
+```python
+from slam_online import OnlineSLAM
+slam = OnlineSLAM(fx, fy, cx, cy, W, H)          # use_lines=True, loop=True, feedback=True, ba=False
+for img in images:                               # BGR or gray, rectified, one at a time
+    T_wc = slam.track(img)                       # 4x4 camera->world, None while initializing / after lost
+```
+```bash
+# video file, image pattern, or camera index (--video 0); --gt only for evaluation / plot
+python3 slam_online.py --video dataset/sequences/06/image_0/%06d.png --gt dataset/poses/06.txt \
+                       --calib 707.0912,707.0912,601.8873,183.1104 --out online06.mp4   # --show: live window
+python3 slam_online.py --selftest                # map-correction check
+```
+Options: first positional number = first N frames, `--ba`, `--no-lines`, `--no-feedback` (loop result only reported,
+VO not corrected = same result as the batch pipeline). Writes `online_traj.txt` (KITTI format, T_wc per frame).
+
+## Run (batch)
 ```bash
 # default = data_dl/pyslam/data/videos/kitti06 (video.mp4 + 06.txt)
 python3 vo_kitti.py
@@ -52,4 +70,4 @@ Runtime for the full 1101-frame sequence: about 6-8 min (+ about 10 min more wit
 ## Notes
 - GT is used only for evaluation (origin-anchored alignment: same start pose, scale fitted on the first 50 frames), never for tracking or loop detection.
 - Inputs must be rectified (no lens distortion). For other datasets, convert GT to KITTI format (one 3x4 `T_w_c` per line, 12 numbers).
-- Tuning knobs: `vo_kitti.py` (frontend: `MAX_PTS`, `MAX_LINES`, `MIN_LINE_LEN`), `loop_closure.py` (`MIN_GAP`, `SHORTLIST`, `MIN_SIM3_INLIERS`, PGO weights `W_ODOM`, `W_LOOP`), `local_ba.py` (`WINDOW`, `EXTRA_FIXED`).
+- Tuning knobs: `frontend.py` (`MAX_PTS`, `MAX_LINES`, `MIN_LINE_LEN`, `INIT_FRAME`, `TRI_GAP` in `setup_camera`), `loop_closure.py` (`MIN_GAP`, `SHORTLIST`, `MIN_SIM3_INLIERS`, PGO weights `W_ODOM`, `W_LOOP`), `local_ba.py` (`WINDOW`, `EXTRA_FIXED`).
