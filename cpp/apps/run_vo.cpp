@@ -1,7 +1,7 @@
 // C++ monocular VO (points + Plücker lines): images in one by one -> pose out. Optional loop closure + Sim(3) PGO (--loop, pluggable modules).
 // usage: run_vo [n_frames] --video PATH|CAM_INDEX [--gt PATH] [--calib fx,fy,cx,cy] [--no-lines] [--traj OUT.txt]
 //               [--init-frame N | --init-px P] [--kf-mapping] [--no-reattach]
-//               [--rel-static] [--drop-dynamic] [--rel-min-px P] [--resize S] [--stride N] [--start N] [--min-parallax DEG] [--init-min-points N] [--sim3-align] [--pose-g2o] [--local-ba] [--ba-window N] [--ba-fixed N] [--kf-parallax PX] [--loop] [--loop-pr thumb|netvlad|salad|mast3r] [--loop-ver orb|mast3r|orb+mast3r] [--loop-python PY] [--loop-min-sim S] [--loop-shortlist N] [--loop-min-gap N] [--loop-no-feedback] [--loop-sync] [--loop-skip-chi2 X] [--autostart] [--traj-online OUT.txt] [--no-viewer] [--snapshot OUT.png]
+//               [--rel-static] [--drop-dynamic] [--rel-min-px P] [--resize S] [--stride N] [--start N] [--min-parallax DEG] [--mature-deg DEG] [--init-min-points N] [--sim3-align] [--pose-g2o] [--hybrid] [--hybrid-w W] [--local-ba] [--ba-window N] [--ba-fixed N] [--kf-parallax PX] [--loop] [--loop-pr thumb|netvlad|salad|mast3r] [--loop-ver orb|mast3r|orb+mast3r] [--loop-python PY] [--loop-min-sim S] [--loop-shortlist N] [--loop-min-gap N] [--loop-no-feedback] [--loop-sync] [--loop-skip-chi2 X] [--autostart] [--traj-online OUT.txt] [--dump-map OUT.txt] [--no-viewer] [--snapshot OUT.png]
 //   --resize S : 영상과 intrinsic을 S배 (고해상도 입력용, 예: iPhone 1920x1440 -> 0.5)
 //   --stride N : N 프레임마다 하나만 사용 (고 fps / 느린 이동용). GT도 같은 간격으로 맞춤
 //   --start N  : 처음 N 프레임 건너뛰기 (예: 시작이 제자리 회전뿐인 핸드헬드 영상). GT도 N부터
@@ -141,8 +141,11 @@ int main(int argc, char** argv) {
   prm.rel_min_px = std::atof(arg(argc, argv, "--rel-min-px", "0"));
   // 점 삼각측량 최소 parallax [deg] (KITTI 기준 2), 초기화에 필요한 맵 점 수: 실내/느린 핸드헬드는 1, 50 정도
   prm.point_min_deg = std::atof(arg(argc, argv, "--min-parallax", "2"));
+  prm.mature_deg = std::atof(arg(argc, argv, "--mature-deg", "5"));  // 이 parallax 이상이면 랜드마크 고정 (그 전엔 매 프레임 재삼각측량)
   prm.init_min_points = std::atoi(arg(argc, argv, "--init-min-points", "100"));
-  const double rp_dist = std::atof(arg(argc, argv, "--rel-dist", "1e6"));  // 프레임 간 2D-2D recoverPose distanceThresh
+  const double rp_dist = std::atof(arg(argc, argv, "--rel-dist", "1e6"));
+  // 진단 전용 (GT 를 추적에 넣음, 평가에 쓰지 말 것): 2D-2D 이동 방향 / 회전을 GT 로
+  const bool oracle_tdir = flag(argc, argv, "--oracle-tdir"), oracle_rot = flag(argc, argv, "--oracle-rot");  // 프레임 간 2D-2D recoverPose distanceThresh
   const char* depth_pat = arg(argc, argv, "--depth", nullptr);
   const char* conf_pat = arg(argc, argv, "--depth-conf", nullptr);
   const int conf_min = std::atoi(arg(argc, argv, "--depth-conf-min", "2"));
@@ -150,6 +153,10 @@ int main(int argc, char** argv) {
   const double depth_scale = std::atof(arg(argc, argv, "--depth-scale", "0.001"));
   prm.use_depth = depth_pat != nullptr;
   prm.depth_6dof = !flag(argc, argv, "--depth-2d2d");
+  prm.hybrid = flag(argc, argv, "--hybrid");  // 2D-2D 프레임을 맵 재투영 + 트랙 epipolar 로 6-DoF 정제
+  prm.hybrid_w = std::atof(arg(argc, argv, "--hybrid-w", "1"));
+  prm.hybrid_min_deg = std::atof(arg(argc, argv, "--hybrid-min-deg", "0"));  // 회전 구간만 (2D-2D 회전 >= 이 값)
+  prm.hybrid_fix_rot = flag(argc, argv, "--hybrid-fix-rot");                  // 회전은 2D-2D 그대로, 이동만
   prm.pose_g2o = flag(argc, argv, "--pose-g2o");  // 6-DoF 추정을 g2o motion-only BA로
   prm.local_ba = flag(argc, argv, "--local-ba");  // 키프레임마다 local BA (g2o, 점만)
   prm.ba_window = std::atoi(arg(argc, argv, "--ba-window", "10"));
@@ -247,6 +254,9 @@ int main(int argc, char** argv) {
     fsnap.open(sp), fsnap.precision(7);
   }
   int snap_seen = 0;
+  // --dump-map (진단): 프레임마다 관측 "o k pid u v" + 그 프레임에 보이는 맵 점 "m k pid X Y Z mature" (world, 매핑 후)
+  std::ofstream fdump;
+  if (const char* p = arg(argc, argv, "--dump-map", nullptr)) fdump.open(p), fdump.precision(7);
   std::map<int, cv::Mat> recent_img;  // 키프레임 등록용 최근 영상 (BGR, 초기화 때 키프레임이 몇 프레임 늦게 정해짐)
   size_t kf_done = 0;
   double t_loop = 0;
@@ -284,7 +294,14 @@ int main(int argc, char** argv) {
     }
     t_front += ms_since(t0);
     t0 = Clock::now();
-    const std::optional<Pose> rel = k ? relative_pose(cam, vo.obs.back(), o, rel_all ? nullptr : &vo.map_p, rp_dist) : std::nullopt;
+    std::optional<Pose> rel = k ? relative_pose(cam, vo.obs.back(), o, rel_all ? nullptr : &vo.map_p, rp_dist) : std::nullopt;
+    if (rel && (oracle_tdir || oracle_rot) && k < int(gt.size())) {  // 진단 전용: 2D-2D 이동 방향 / 회전을 GT 로 바꿔 넣기
+      const Mat3 Ra = gt[k - 1].leftCols<3>(), Rb = gt[k].leftCols<3>();  // T_wc
+      const Mat3 Rr = Rb.transpose() * Ra;                                // cam_{k-1} -> cam_k
+      const Vec3 tr = Rb.transpose() * (gt[k - 1].col(3) - gt[k].col(3));
+      if (oracle_rot) rel->R = Rr;
+      if (oracle_tdir && tr.norm() > 1e-6) rel->t = tr.normalized();
+    }
     std::optional<Pose> init;
     if (!vo.initialized() && !prm.use_depth && k > 0 &&
         (init_fixed > 0 ? k == init_fixed : median_shift(vo.obs[0], o, 50) >= init_px)) {
@@ -298,6 +315,15 @@ int main(int argc, char** argv) {
       while (recent_img.size() > 40) recent_img.erase(recent_img.begin());
     }
     vo.add(std::move(o), rel, init);
+    if (fdump.is_open() && vo.has_pose[k]) {
+      const FrameObs& ob = vo.obs[k];
+      for (size_t i = 0; i < ob.pid.size(); ++i) {
+        fdump << "o " << k << " " << ob.pid[i] << " " << ob.uv[i](0) << " " << ob.uv[i](1) << "\n";
+        if (const auto it = vo.map_p.find(ob.pid[i]); it != vo.map_p.end())
+          fdump << "m " << k << " " << ob.pid[i] << " " << it->second(0) << " " << it->second(1) << " " << it->second(2)
+                << " " << vo.mature_p.count(ob.pid[i]) << "\n";
+      }
+    }
     if (fon.is_open() && vo.has_pose[k]) {
       const Pose& p = vo.poses[k];
       const Mat3 Rwc = p.R.transpose();

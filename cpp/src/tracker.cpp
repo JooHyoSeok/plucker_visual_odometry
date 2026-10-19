@@ -295,6 +295,13 @@ bool VOTracker::track(int k) {
   }
   if (kept.X.size() + kept.L.size() < 6) return fail(k, "almost all map correspondences are outliers");  // 맵이 거의 다 안 맞음 -> 실패
   if (culled) p1 = solve(kept, p1);
+  const double rel_deg = rit != rel.end() ? std::acos(std::clamp((rit->second.R.trace() - 1) / 2, -1.0, 1.0)) * 180 / M_PI : 0;
+  if (prm.hybrid && rit != rel.end() && has_pose[k - 1] && rel_deg >= prm.hybrid_min_deg) {  // 2D-2D 회전/방향을 맵 + epipolar 로 함께 정제
+    std::vector<std::pair<Vec2, Vec2>> tr;
+    for (size_t i = 0; i < o.pid.size(); ++i)
+      if (const Vec2* u = obs[k - 1].point(o.pid[i])) tr.emplace_back(*u, o.uv[i]);
+    p1 = hybrid_ba(cam, p1, kept, poses[k - 1], tr, prm.hybrid_w, 10, 3.0, prm.hybrid_fix_rot);
+  }
   r = residuals(cam, p1, kept);
   VecX a = r.cwiseAbs();
   const int n = a.size();

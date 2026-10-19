@@ -6,3 +6,4 @@ build/
 .cache/
 build_dev/
 build_tsan/
+build_diag/

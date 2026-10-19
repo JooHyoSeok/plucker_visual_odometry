@@ -9,6 +9,13 @@ namespace vp {
 // m.L (선)은 아직 무시 -> 선 edge는 다음 단계
 Pose motion_only_ba(const Camera& c, const Pose& init, const MapObs& m, int iters = 40, double huber_px = 3.0);
 
+// 하이브리드 motion-only BA: 맵 점 재투영 [px] + 직전 프레임 (포즈 prev 고정) 과의 트랙 epipolar Sampson 오차 [px] x w_epi.
+// 회전 구간에서 2D-2D 만으로는 yaw 회전과 옆 이동이 섞여 (bas-relief) 이동 방향이 틀어지는 것을 맵이 잡아 주고,
+// 맵만 쓸 때의 회전 드리프트는 많은 트랙의 epipolar 항이 잡아 줌. tracks: (직전 프레임 픽셀, 현재 픽셀)
+Pose hybrid_ba(const Camera& c, const Pose& init, const MapObs& m, const Pose& prev,
+               const std::vector<std::pair<Vec2, Vec2>>& tracks, double w_epi = 1.0, int iters = 10, double huber_px = 3.0,
+               bool fix_rotation = false);
+
 struct LocalBAStats {
   int kfs = 0, fixed = 0, points = 0, edges = 0, outliers = 0;
   double ms = 0;

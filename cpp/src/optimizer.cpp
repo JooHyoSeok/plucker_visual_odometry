@@ -1,5 +1,6 @@
 #include "vo_plucker/optimizer.h"
 
+#include <g2o/core/base_unary_edge.h>
 #include <g2o/core/block_solver.h>
 #include <g2o/core/optimization_algorithm_levenberg.h>
 #include <g2o/core/robust_kernel_impl.h>
@@ -17,6 +18,127 @@
 #include <unordered_set>
 
 namespace vp {
+
+namespace {
+// 고정된 대응 (직전 / 현재 프레임 정규화 좌표) 의 Sampson epipolar 오차 [px]. 정점 = 현재 T_cw, 직전 T_cw 는 고정.
+// Jacobian 은 g2o 기본 (수치 미분)
+class EdgeEpipolar : public g2o::BaseUnaryEdge<1, double, g2o::VertexSE3Expmap> {
+ public:
+  Vec3 x0, x1;
+  g2o::SE3Quat T_prev_inv;
+  double f = 1;
+  void computeError() override {
+    const g2o::SE3Quat Tr = static_cast<const g2o::VertexSE3Expmap*>(_vertices[0])->estimate() * T_prev_inv;
+    const Vec3 t = Tr.translation();
+    if (t.norm() < 1e-12) {
+      _error[0] = 0;
+      return;
+    }
+    const Mat3 E = skew(t.normalized()) * Tr.rotation().toRotationMatrix();
+    const Vec3 Ex0 = E * x0, Etx1 = E.transpose() * x1;
+    _error[0] = f * x1.dot(Ex0) / std::sqrt(Ex0.head<2>().squaredNorm() + Etx1.head<2>().squaredNorm() + 1e-18);
+  }
+  bool read(std::istream&) override { return false; }
+  bool write(std::ostream&) const override { return false; }
+};
+}  // namespace
+
+Pose hybrid_ba(const Camera& c, const Pose& init, const MapObs& m, const Pose& prev,
+               const std::vector<std::pair<Vec2, Vec2>>& tracks, double w_epi, int iters, double huber_px,
+               bool fix_rotation) {
+  if (fix_rotation) {  // 회전 고정: 이동 3-DoF 만 (g2o SE3 정점은 회전/이동 분리 고정이 안 돼서 작은 LM 으로)
+    Vec3 t = init.t;
+    auto cost = [&](const Vec3& tt, VecX* r) {
+      const Pose p{init.R, tt};
+      const VecX rm = residuals(c, p, MapObs{m.X, m.uv, {}, {}});
+      const Mat3 Rr = init.R * prev.R.transpose();
+      const Vec3 tr = tt - Rr * prev.t;
+      VecX re(tracks.size());
+      const Mat3 E = tr.norm() > 1e-12 ? Mat3(skew(tr.normalized()) * Rr) : Mat3::Zero();
+      for (size_t i = 0; i < tracks.size(); ++i) {
+        const Vec3 x0 = c.Kinv * Vec3(tracks[i].first(0), tracks[i].first(1), 1.0);
+        const Vec3 x1 = c.Kinv * Vec3(tracks[i].second(0), tracks[i].second(1), 1.0);
+        const Vec3 Ex0 = E * x0, Etx1 = E.transpose() * x1;
+        re(i) = std::sqrt(w_epi) * c.fx * x1.dot(Ex0) / std::sqrt(Ex0.head<2>().squaredNorm() + Etx1.head<2>().squaredNorm() + 1e-18);
+      }
+      VecX all(rm.size() + re.size());
+      all << rm, re;
+      if (r) *r = all;
+      double s = 0;  // Huber
+      for (int i = 0; i < all.size(); ++i) {
+        const double a = std::abs(all(i));
+        s += a < huber_px ? 0.5 * a * a : huber_px * (a - 0.5 * huber_px);
+      }
+      return s;
+    };
+    VecX r;
+    double f0 = cost(t, &r), lam = 1e-3;
+    for (int it = 0; it < iters; ++it) {
+      Eigen::MatrixXd J(r.size(), 3);
+      for (int d = 0; d < 3; ++d) {
+        Vec3 tp = t;
+        tp(d) += 1e-7;
+        VecX rp;
+        cost(tp, &rp);
+        J.col(d) = (rp - r) / 1e-7;
+      }
+      VecX w(r.size());
+      for (int i = 0; i < r.size(); ++i) w(i) = std::abs(r(i)) < huber_px ? 1.0 : huber_px / std::abs(r(i));
+      const Mat3 H = J.transpose() * w.asDiagonal() * J;
+      const Vec3 g = J.transpose() * w.cwiseProduct(r);
+      bool stepped = false;
+      while (lam < 1e8) {
+        const Vec3 dt = -(H + lam * Mat3(H.diagonal().asDiagonal())).ldlt().solve(g);
+        VecX r1;
+        const double f1 = cost(t + dt, &r1);
+        if (f1 < f0) {
+          t += dt, r = r1, f0 = f1, lam = std::max(lam / 3, 1e-7), stepped = true;
+          break;
+        }
+        lam *= 4;
+      }
+      if (!stepped) break;
+    }
+    return Pose{init.R, t};
+  }
+  using Block = g2o::BlockSolver_6_3;
+  g2o::SparseOptimizer opt;
+  opt.setAlgorithm(new g2o::OptimizationAlgorithmLevenberg(
+      std::make_unique<Block>(std::make_unique<g2o::LinearSolverDense<Block::PoseMatrixType>>())));
+  auto* v = new g2o::VertexSE3Expmap();  // T_cw
+  v->setId(0);
+  v->setEstimate(g2o::SE3Quat(init.R, init.t));
+  opt.addVertex(v);
+  auto huber = [&]() {
+    auto* rk = new g2o::RobustKernelHuber();
+    rk->setDelta(huber_px);
+    return rk;
+  };
+  for (size_t i = 0; i < m.X.size(); ++i) {
+    auto* e = new g2o::EdgeSE3ProjectXYZOnlyPose();
+    e->setVertex(0, v);
+    e->setMeasurement(m.uv[i]);
+    e->setInformation(Eigen::Matrix2d::Identity());
+    e->setRobustKernel(huber());
+    e->fx = c.fx, e->fy = c.fy, e->cx = c.cx, e->cy = c.cy;
+    e->Xw = m.X[i];
+    opt.addEdge(e);
+  }
+  const g2o::SE3Quat Tp_inv = g2o::SE3Quat(prev.R, prev.t).inverse();
+  for (const auto& [u0, u1] : tracks) {
+    auto* e = new EdgeEpipolar();
+    e->setVertex(0, v);
+    e->x0 = c.Kinv * Vec3(u0(0), u0(1), 1.0), e->x1 = c.Kinv * Vec3(u1(0), u1(1), 1.0);
+    e->T_prev_inv = Tp_inv, e->f = c.fx;
+    e->setInformation(Eigen::Matrix<double, 1, 1>::Constant(w_epi));
+    e->setRobustKernel(huber());
+    opt.addEdge(e);
+  }
+  opt.initializeOptimization();
+  opt.optimize(iters);
+  const g2o::SE3Quat T = v->estimate();
+  return Pose{T.rotation().toRotationMatrix(), T.translation()};
+}
 
 Pose motion_only_ba(const Camera& c, const Pose& init, const MapObs& m, int iters, double huber_px) {
   using Block = g2o::BlockSolver_6_3;

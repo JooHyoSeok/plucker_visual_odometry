@@ -52,6 +52,10 @@ struct TrackerParams {
   bool use_depth = false;     // FrameObs::depth 사용 (깊이 초기화 + 깊이 맵 점)
   bool depth_6dof = true;     // use_depth일 때 2D-2D 대신 맵 기준 6-DoF로 추적
   bool pose_g2o = false;      // 6-DoF 추정을 g2o motion-only BA로 (점만, 선 edge는 다음 단계). false = 자체 LM (점+선)
+  bool hybrid = false;        // 2D-2D 로 푼 프레임을 맵 재투영 + 트랙 epipolar 로 6-DoF 정제 (hybrid_ba)
+  double hybrid_w = 1.0;      // epipolar 항 가중치 (맵 재투영 대비)
+  double hybrid_min_deg = 0;  // 2D-2D 회전이 이 각도 [deg/frame] 이상인 프레임에만 (회전 구간)
+  bool hybrid_fix_rot = false; // 회전은 2D-2D 그대로, 이동만 정제
   bool local_ba = false;      // 키프레임마다 local BA (g2o, 점만): 키프레임 선택은 is_keyframe
   int ba_window = 10;         // local BA에서 최적화하는 최근 키프레임 수
   int ba_fixed = 10;          // 같은 점을 보는 그 앞 키프레임을 최대 이만큼 고정
