@@ -19,7 +19,7 @@ Pose hybrid_ba(const Camera& c, const Pose& init, const MapObs& m, const Pose& p
                bool fix_rotation = false);
 
 struct LocalBAStats {
-  int kfs = 0, fixed = 0, points = 0, edges = 0, outliers = 0, lines = 0, line_outliers = 0;
+  int kfs = 0, fixed = 0, points = 0, edges = 0, outliers = 0, lines = 0, line_outliers = 0, depth_priors = 0;
   double ms = 0;
   double rms_before = 0, rms_after = 0;  // 인라이어 관측의 재투영 오차 RMS [px], BA 전 / 후
   bool discarded = false;                 // (스레드) BA 하는 동안 루프 보정이 들어와서 결과를 버림
@@ -31,6 +31,7 @@ struct LocalBAStats {
 //         창 안 비키프레임 포즈는 직전 키프레임과 같은 보정 적용
 // lines: Plücker 라인도 orthonormal 4-DoF 정점 + 끝점 거리 엣지 (해석 Jacobian, vo_plucker/g2o_line.h) 로 같이 최적화
 // mature_only: 시차가 충분해서 이미 고정된 (mature) 점만 (낮은 시차 점의 깊이 편향 진단용)
+// vo.prm.ba_depth_sigma > 0: 키프레임이 보는 점의 깊이 = vo.da3_ref x DA3 깊이 (log, Huber) prior -> 창의 스케일을 DA3 에 묶음
 LocalBAStats local_ba(VOTracker& vo, int window = 10, int max_fixed = 10, bool lines = false, bool mature_only = false);
 
 // local BA 를 세 단계로 (LocalMapping 스레드용, ORB-SLAM3 처럼 최적화는 map lock 없이):

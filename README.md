@@ -52,6 +52,24 @@ cpp/build/run_vo --video dataset/sequences/00/image_2/%06d.png --gt dataset/pose
   `--loop-sync` runs it inline (deterministic, for A/B comparisons). `--loop-skip-chi2 X` (default 50): a new loop
   edge that already fits the current estimate is added without re-running the PGO.
 - KITTI Sim(3) ATE with the built-in loop closure: 00 101 m -> about 5 m, 06 48 m -> 14-23 m (varies run to run).
+- Metric depth scale anchor `--depth-prior da3` (Depth Anything 3 DA3NESTED-GIANT-LARGE in `python/loop_server.py`, needs
+  `--loop-python` with depth_anything_3; ~8-10 GB GPU): per keyframe VO-units-per-meter from DA3 vs VO depth -> log-scale
+  prior edges in the Sim(3) pose graph every 10 keyframes (loop thread). KITTI 00-10 without loops: drift 2.20 -> 0.56 %,
+  t_rel 12.2 -> 2.35 %. Best combination so far: `--depth-prior da3 --loop`. `--da3-init`: initialize from DA3 depth on frame 0.
+- With DA3 (PROGRESS.md section 10): `--kf-parallax 25` (fewer keyframes, 2.4x faster), `--local-ba --ba-depth-prior 0.3`
+  (local BA with a per-point DA3 log-depth prior from the anchor depths, BA can no longer drift the window scale),
+  `--loop-da3-3d --loop-min-f 40` (ORB loop verification falls back to DA3-depth 3D of the ORB keypoints when the local
+  3D is missing / poor; used only for the first link of a new revisit). Best configuration:
+  `--depth-prior da3 --loop --kf-parallax 25 --local-ba --ba-depth-prior 0.3 --loop-da3-3d --loop-min-f 40 --loop-python <py>`.
+  At most 2 DA3 servers on one 32 GB GPU.
+- Options (off by default, mixed results per sequence, see PROGRESS.md section 9): `--hybrid --hybrid-fix-rot` (translation
+  refined by map + epipolar), `--loop-consist N --loop-prune R` (loop consistency / outlier edges), `--loop-fuse` (map point
+  fusion + covisibility candidate exclusion), `--local-ba [--ba-lines]` (keyframe BA in a LocalMapping thread, Plücker lines in
+  the orthonormal 4-DoF parameterization with analytic Jacobians; `--ba-sync` runs it inline).
+- Result tools: `cpp/tools/make_video.py` (image + trajectory + error/local-scale panel; run_vo `--traj-online`),
+  `cpp/tools/plot_traj.py --paper` (paper-style trajectory figure, PNG + PDF), `cpp/tools/plot_vs_orbslam.py`.
+- EuRoC MAV: `python3 cpp/tools/euroc_to_kitti.py ~/Desktop/hyoseok/EuRoC/*/SEQ` (undistorted cam0 + camera GT in
+  KITTI layout), then `benchmark.py --suite euroc`.
 - Benchmark over many sequences: `python3 cpp/tools/benchmark.py --suite kitti --args="--loop"`,
   plots: `cpp/tools/plot_bench.py`, `cpp/tools/plot_traj.py`.
 

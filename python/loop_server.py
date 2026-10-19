@@ -11,6 +11,8 @@ line protocol on stdin/stdout (one reply line per request):
   anchor KF N (u v d)*N                 -> anchor A n               (--depth da3: VO units per meter at keyframe KF =
                                                                      median(VO depth / DA3 metric depth) at the given
                                                                      pixels, image = the one added last for KF)
+  depthat PATH N (u v)*N                 -> depth z1 .. zN           (--depth da3: DA3 metric depth at the pixels, 0 = invalid;
+                                                                     used by run_vo --da3-init on the first frame)
   quit
 
 place recognition (--pr): netvlad (hloc, VGG16-NetVLAD-Pitts30K), salad (DINOv2-SALAD),
@@ -196,12 +198,19 @@ class Da3Depth:
         self.net = DepthAnything3.from_pretrained("depth-anything/DA3NESTED-GIANT-LARGE").to(device).eval()
 
     @torch.no_grad()
+    def at(self, bgr, uv):  # DA3 metric depth [m] at pixels uv (n, 2). 깊이 맵은 sample() 용으로 남겨 둠
+        self.dep = self.net.inference([cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)], process_res=self.RES).depth[0]
+        self.sy, self.sx = self.dep.shape[0] / bgr.shape[0], self.dep.shape[1] / bgr.shape[1]
+        return self.sample(uv)
+
+    def sample(self, uv):  # 마지막 at() 깊이 맵에서
+        h, w = self.dep.shape
+        return self.dep[np.clip((uv[:, 1] * self.sy).astype(int), 0, h - 1), np.clip((uv[:, 0] * self.sx).astype(int), 0, w - 1)]
+
     def __call__(self, bgr, pts):
-        dep = self.net.inference([cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)], process_res=self.RES).depth[0]
-        sy, sx = dep.shape[0] / bgr.shape[0], dep.shape[1] / bgr.shape[1]
-        z = dep[np.clip((pts[:, 1] * sy).astype(int), 0, dep.shape[0] - 1), np.clip((pts[:, 0] * sx).astype(int), 0, dep.shape[1] - 1)]
+        z = self.at(bgr, pts[:, :2])
         ok = (z > self.ZMIN) & (z < self.ZMAX) & (pts[:, 2] > 0)
-        return (float(np.median(pts[ok, 2] / z[ok])), int(ok.sum())) if ok.sum() >= 20 else None
+        return (float(np.median(pts[ok, 2] / z[ok])), int(ok.sum()), np.where(ok, z, 0)) if ok.sum() >= 20 else None
 
 
 def main():
@@ -218,7 +227,7 @@ def main():
     pr = pr(o.device) if pr else None
     depth = Da3Depth(o.device) if o.depth == "da3" else None
     log(f"[loop_server] ready: pr={o.pr} ver={o.ver} depth={o.depth} device={o.device}")
-    desc, last_img = {}, {}
+    desc, last_img, depth_kf = {}, {}, -1
     for line in sys.stdin:
         t = line.split()
         if not t:
@@ -244,7 +253,18 @@ def main():
                 kf, n = int(t[1]), int(t[2])
                 pts = np.array(t[3:3 + 3 * n], float).reshape(-1, 3)
                 r = depth(last_img.pop(kf), pts) if depth and kf in last_img else None
-                reply = "none" if r is None else f"anchor {r[0]:.9g} {r[1]}"
+                depth_kf = kf
+                reply = "none" if r is None else f"anchor {r[0]:.9g} {r[1]} " + " ".join(f"{v:.3f}" for v in r[2])
+            elif t[0] == "depthkf":  # 바로 앞 anchor 키프레임의 깊이 맵 재사용 (DA3 추가 추론 없음)
+                kf, n = int(t[1]), int(t[2])
+                uv = np.array(t[3:3 + 2 * n], float).reshape(-1, 2)
+                z = depth.sample(uv) if depth and n and kf == depth_kf else np.zeros(n)
+                reply = "depth " + " ".join(f"{v:.3f}" for v in z)
+            elif t[0] == "depthat":
+                n = int(t[2])
+                uv = np.array(t[3:3 + 2 * n], float).reshape(-1, 2)
+                z = depth.at(cv2.imread(t[1]), uv) if depth and n else np.zeros(0)
+                reply = "depth " + " ".join(f"{v:.4f}" for v in z)
             elif t[0] == "verify":
                 i, j = int(t[1]), int(t[2])
                 K = [float(x) for x in t[3:7]]
@@ -259,6 +279,8 @@ def main():
                 reply = "error unknown command"
         except Exception as e:  # 한 요청이 실패해도 서버는 계속
             log(f"[loop_server] {t[0]} failed: {e!r}")
+            if isinstance(e, torch.cuda.OutOfMemoryError):
+                torch.cuda.empty_cache()  # 다른 GPU 작업과 겹쳐 잠깐 모자란 경우 다음 요청은 되게
             reply = "none" if t[0] == "verify" else "error"
         print(reply, file=reply_out, flush=True)
 

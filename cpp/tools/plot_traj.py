@@ -84,13 +84,14 @@ def paper_figure(jobs, runs, out, title):
         ax.text(0.03, 0.97, "ATE [m]: " + " → ".join(ates), transform=ax.transAxes, va="top", fontsize=8,
                 bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=1.5))
     order = ["Ground truth"] + [l for l, _ in runs] + ["Start"]
+    h_in = fig.get_figheight()  # 제목 (있으면) 아래에 범례: 둘이 겹치지 않게 인치 단위로 자리 잡기
     fig.legend([handles[k] for k in order if k in handles], [k for k in order if k in handles], loc="upper center",
-               ncol=len(order), frameon=False, fontsize=9.5)
+               bbox_to_anchor=(0.5, 1 - (0.3 / h_in if title else 0)), ncol=len(order), frameon=False, fontsize=9.5)
     if title:
-        fig.suptitle(title, y=0.995, fontsize=11)
+        fig.suptitle(title, y=1 - 0.05 / h_in, va="top", fontsize=11)
     fig.text(0.005, 0.005, "Trajectories Sim(3)-aligned to ground truth (as for the ATE). "
              "† tracked < 95 % of the sequence (ATE over the tracked part).", fontsize=8, va="bottom")
-    fig.tight_layout(rect=(0, 0.025, 1, 0.94 if not title else 0.92))
+    fig.tight_layout(rect=(0, 0.025, 1, 1 - (0.65 if title else 0.35) / h_in))
     fig.savefig(out, dpi=200)
     fig.savefig(Path(out).with_suffix(".pdf"))
     print("saved", out, "and", Path(out).with_suffix(".pdf"))
@@ -109,6 +110,8 @@ def main():
     runs = [tuple(s.split("=", 1)) for s in o.runs]
     if o.suite == "kitti":
         jobs = list(bm.kitti_jobs(o.seqs))
+    elif o.suite == "euroc":
+        jobs = list(bm.euroc_jobs(o.seqs))
     else:  # GT already converted by benchmark.py into <dir>/gt
         jobs = [j for j in bm.icra_jobs(o.seqs, [o.mode], Path(runs[0][1])) if j["mode"] == o.mode]
     if o.paper:

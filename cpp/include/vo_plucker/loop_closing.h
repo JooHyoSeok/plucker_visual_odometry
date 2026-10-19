@@ -49,6 +49,7 @@ struct LoopEdge {
   int i = -1, j = -1;  // keyframe frame indices, i = current (newer)
   Sim3 S;              // cam_j -> cam_i (VO units of each keyframe)
   int inliers = 0;
+  bool da3 = false;    // DA3 깊이 3D 로 구한 Sim(3): 스케일은 앵커와 같은 정보 -> PGO 에서 약하게
 };
 
 class PlaceRecognizer {
@@ -67,6 +68,7 @@ struct KFState {
   Pose prev_pose;
   std::vector<Vec3> uvd;  // 이 키프레임에 보이는 맵 점 (u, v, VO 깊이), 최대 3000개
   std::vector<int> pid;   // uvd 와 같은 순서의 맵 점 (트랙) id
+  double da3_scale = 0;   // 이 키프레임의 DA3 앵커 (VO 단위/미터, 0 = 없음)
 };
 
 class LoopVerifier {
@@ -79,11 +81,16 @@ class LoopVerifier {
 };
 
 std::unique_ptr<PlaceRecognizer> make_thumbnail_recognizer();
-std::unique_ptr<LoopVerifier> make_orb_verifier(const Camera& cam, int min_f = 80);  // min_f: F-RANSAC 인라이어 최소
+struct LoopServer;
+// min_f: F-RANSAC 인라이어 최소. da3: 있으면 로컬 3D 로 Sim(3) 가 안 될 때 ORB 키포인트의 DA3 깊이 3D 로 다시 (앵커 키프레임만)
+std::unique_ptr<LoopVerifier> make_orb_verifier(const Camera& cam, int min_f = 80, std::shared_ptr<LoopServer> da3 = nullptr);
 
 // Python 플러그인 서버 (stdin/stdout 줄 프로토콜, python/loop_server.py 참고). 한 프로세스를 후보 검색과 검증이 공유
 struct LoopServer;
 std::shared_ptr<LoopServer> start_loop_server(const std::string& cmd);
+// --depth da3 서버의 DA3 metric depth [m] (0 = 없음): run_vo --da3-init 첫 프레임 초기화용
+std::vector<double> server_depth_at(LoopServer& s, const cv::Mat& img, const std::vector<Vec2>& uv);
+std::vector<double> server_depth_kf(LoopServer& s, int kf, const std::vector<Vec2>& uv);  // 마지막 앵커 키프레임의 DA3 깊이 [m]
 std::unique_ptr<PlaceRecognizer> make_py_recognizer(std::shared_ptr<LoopServer> srv, double min_sim);
 std::unique_ptr<LoopVerifier> make_py_verifier(std::shared_ptr<LoopServer> srv, const Camera& cam);
 // ORB F-RANSAC 기하 검증 (빠름) 을 먼저 통과한 후보만 main 으로 검증

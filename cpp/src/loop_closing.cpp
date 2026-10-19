@@ -37,6 +37,8 @@ Eigen::Matrix<double, 7, 7> info(double r, double t, double s) {
   return I;
 }
 const Eigen::Matrix<double, 7, 7> kInfoOdom = info(0.005, 0.02, 0.02), kInfoLoop = info(0.01, 0.05, 0.05);
+// DA3 깊이 3D 루프: 스케일 a_i/a_j 는 DA3 앵커 엣지와 같은 정보 (이중 계산 X), 이동은 깊이 잡음 (~6 % x 거리) 만큼 덜 믿음
+const Eigen::Matrix<double, 7, 7> kInfoLoopDa3 = info(0.01, 0.1, 1.0);
 
 // metric depth 앵커: 키프레임 Sim(3) 정점의 log 스케일 = 측정 (log a_k - log a_ref). Jacobian 은 g2o 수치 미분
 class EdgeScalePrior : public g2o::BaseUnaryEdge<1, double, g2o::VertexSim3Expmap> {
@@ -118,14 +120,22 @@ Sim3 umeyama(const std::vector<Vec3>& A, const std::vector<Vec3>& B) {  // B ≈
 
 class OrbVerifier : public LoopVerifier {
  public:
-  explicit OrbVerifier(const Camera& cam, int min_f = 80)
-      : cam_(cam), orb_(cv::ORB::create(1500, 1.2f, 8, 31, 0, 2, cv::ORB::HARRIS_SCORE, 31, 10)), kMinF(min_f) {}
+  explicit OrbVerifier(const Camera& cam, int min_f = 80, std::shared_ptr<LoopServer> da3 = nullptr)
+      : cam_(cam), orb_(cv::ORB::create(1500, 1.2f, 8, 31, 0, 2, cv::ORB::HARRIS_SCORE, 31, 10)), kMinF(min_f),
+        da3_(std::move(da3)) {}
 
   int add(const KFState& st, const cv::Mat& img) override {
     KF& d = kf_[st.kf];
     std::vector<cv::KeyPoint> kp;
     orb_->detectAndCompute(to_gray(img), cv::noArray(), kp, d.des);
     for (const auto& p : kp) d.pts.push_back(p.pt);
+    if (da3_ && st.da3_scale > 0) {  // DA3 깊이 3D (RGB-D 처럼): X = a_k z K^-1 [u v 1], 앵커와 같은 3-40 m 범위만
+      std::vector<Vec2> uv;
+      for (const auto& p : d.pts) uv.emplace_back(p.x, p.y);
+      const std::vector<double> z = server_depth_kf(*da3_, st.kf, uv);
+      for (size_t m = 0; m < z.size(); ++m)
+        if (z[m] > 3 && z[m] < 40) d.d3[m] = st.da3_scale * z[m] * cam_.Kinv * Vec3(uv[m](0), uv[m](1), 1);
+    }
     const int prev = st.prev;
     if (prev < 0 || !kf_.count(prev)) return -1;
     // 직전 키프레임 a의 로컬 3D: a <-> kf ORB 매칭 -> VO 포즈로 삼각측량 -> {ORB index: X in cam_a}
@@ -169,18 +179,28 @@ class OrbVerifier : public LoopVerifier {
     std::vector<cv::Point2f> pi, pj;
     std::vector<char> ok;
     if (f_inliers(i, j, mm, pi, pj, ok) < kMinF) return std::nullopt;
+    // 로컬 (2-view 삼각측량) 3D 로 먼저, 안 되면 DA3 깊이 3D 로 (시작 직후처럼 로컬 3D 가 부정확 / 적은 곳)
+    if (auto e = sim3(i, j, ki.l3d, kj.l3d, mm, pi, pj, ok)) return e;
+    if (ki.d3.empty() || kj.d3.empty()) return std::nullopt;
+    auto e = sim3(i, j, ki.d3, kj.d3, mm, pi, pj, ok);
+    if (e) e->da3 = true, std::fprintf(stderr, "    [loop %d <-> %d: Sim(3) from DA3 depth, %d inliers]\n", i, j, e->inliers);
+    return e;
+  }
+
+  // F-RANSAC 인라이어 중 양쪽에 3D 가 있는 매칭으로 Sim(3) RANSAC
+  std::optional<LoopEdge> sim3(int i, int j, const std::unordered_map<int, Vec3>& Ai, const std::unordered_map<int, Vec3>& Aj,
+                               const std::vector<std::pair<int, int>>& mm, const std::vector<cv::Point2f>& pi,
+                               const std::vector<cv::Point2f>& pj, const std::vector<char>& ok) {
     std::vector<Vec3> Xi, Xj;
     std::vector<Vec2> ui, uj;
-    int nf = 0;
     for (size_t m = 0; m < mm.size(); ++m) {
       if (!ok[m]) continue;
-      ++nf;
-      const auto a = ki.l3d.find(mm[m].first), b = kj.l3d.find(mm[m].second);
-      if (a == ki.l3d.end() || b == kj.l3d.end()) continue;
+      const auto a = Ai.find(mm[m].first), b = Aj.find(mm[m].second);
+      if (a == Ai.end() || b == Aj.end()) continue;
       Xi.push_back(a->second), Xj.push_back(b->second);
       ui.emplace_back(pi[m].x, pi[m].y), uj.emplace_back(pj[m].x, pj[m].y);
     }
-    if (nf < kMinF || int(Xi.size()) < kMinSim3) return std::nullopt;
+    if (int(Xi.size()) < kMinSim3) return std::nullopt;
     // Sim(3) RANSAC: Xi ≈ S Xj, 인라이어 = 양쪽 이미지 재투영 < kReprojPx
     const int n = Xi.size();
     auto inliers = [&](const Sim3& S, std::vector<char>& in) {
@@ -217,6 +237,7 @@ class OrbVerifier : public LoopVerifier {
     const auto it = kf_.find(kf);
     if (it == kf_.end()) return;
     for (auto& [m, X] : it->second.l3d) X /= s;
+    for (auto& [m, X] : it->second.d3) X /= s;
   }
 
  private:
@@ -224,12 +245,14 @@ class OrbVerifier : public LoopVerifier {
     std::vector<cv::Point2f> pts;
     cv::Mat des;
     std::unordered_map<int, Vec3> l3d;  // ORB index -> X in cam (VO 단위)
+    std::unordered_map<int, Vec3> d3;   // ORB index -> DA3 깊이 X in cam (VO 단위)
   };
   Camera cam_;
   cv::Ptr<cv::ORB> orb_;
   std::unordered_map<int, KF> kf_;
   std::mt19937 rng_{0};
   int kMinF;  // F-RANSAC 인라이어 최소 수
+  std::shared_ptr<LoopServer> da3_;
 };
 }  // namespace
 
@@ -258,6 +281,7 @@ struct LoopServer {
     rmdir(dir.c_str());
   }
   std::string ask(const std::string& req) {
+    std::lock_guard<std::mutex> lk(mx);  // 메인 스레드 (--da3-init 첫 프레임) 와 루프 스레드가 같이 씀
     std::fputs((req + "\n").c_str(), to);
     std::fflush(to);
     std::string r;
@@ -275,7 +299,35 @@ struct LoopServer {
     ask("add " + std::to_string(kf) + " " + path);
     std::remove(path.c_str());
   }
-  std::optional<double> anchor(int kf, const std::vector<Vec3>& uvd) {  // 방금 add 한 키프레임의 VO 단위/미터
+  std::vector<double> depth_at(const cv::Mat& img, const std::vector<Vec2>& uv) {  // DA3 metric depth [m], 0 = 없음
+    const std::string path = dir + "/depthat.bmp";
+    cv::imwrite(path, img);
+    std::ostringstream q;
+    q.precision(7);
+    q << "depthat " << path << " " << uv.size();
+    for (const Vec2& x : uv) q << " " << x(0) << " " << x(1);
+    std::istringstream r(ask(q.str()));
+    std::remove(path.c_str());
+    std::string tag;
+    r >> tag;
+    std::vector<double> z(uv.size(), 0.0);
+    for (double& v : z) r >> v;
+    return z;
+  }
+  std::vector<double> depth_kf(int kf, const std::vector<Vec2>& uv) {  // 마지막 anchor 키프레임의 DA3 깊이 맵에서 [m]
+    std::ostringstream q;
+    q.precision(7);
+    q << "depthkf " << kf << " " << uv.size();
+    for (const Vec2& x : uv) q << " " << x(0) << " " << x(1);
+    std::istringstream r(ask(q.str()));
+    std::string tag;
+    r >> tag;
+    std::vector<double> z(uv.size(), 0.0);
+    for (double& v : z) r >> v;
+    return r ? z : std::vector<double>(uv.size(), 0.0);
+  }
+  // 방금 add 한 키프레임의 VO 단위/미터. z: 점별 DA3 깊이 [m] (쓴 범위 밖이면 0)
+  std::optional<double> anchor(int kf, const std::vector<Vec3>& uvd, std::vector<double>* z = nullptr) {
     std::ostringstream q;
     q.precision(9);
     q << "anchor " << kf << " " << uvd.size();
@@ -283,12 +335,19 @@ struct LoopServer {
     std::istringstream r(ask(q.str()));
     std::string tag;
     double a = 0;
-    r >> tag >> a;
+    int n = 0;
+    r >> tag >> a >> n;
     if (tag != "anchor" || !r || !(a > 0)) return std::nullopt;
+    if (z) {
+      z->assign(uvd.size(), 0.0);
+      for (double& v : *z) r >> v;
+      if (!r) z->clear();
+    }
     return a;
   }
   pid_t pid;
   FILE *to, *from;
+  std::mutex mx;
   std::string dir;
   std::unordered_set<int> added;
 };
@@ -357,8 +416,12 @@ class PyVerifier : public LoopVerifier {
 }  // namespace
 
 std::unique_ptr<PlaceRecognizer> make_thumbnail_recognizer() { return std::make_unique<ThumbnailRecognizer>(); }
-std::unique_ptr<LoopVerifier> make_orb_verifier(const Camera& cam, int min_f) { return std::make_unique<OrbVerifier>(cam, min_f); }
+std::unique_ptr<LoopVerifier> make_orb_verifier(const Camera& cam, int min_f, std::shared_ptr<LoopServer> da3) {
+  return std::make_unique<OrbVerifier>(cam, min_f, std::move(da3));
+}
 std::shared_ptr<LoopServer> start_loop_server(const std::string& cmd) { return std::make_shared<LoopServer>(cmd); }
+std::vector<double> server_depth_at(LoopServer& s, const cv::Mat& img, const std::vector<Vec2>& uv) { return s.depth_at(img, uv); }
+std::vector<double> server_depth_kf(LoopServer& s, int kf, const std::vector<Vec2>& uv) { return s.depth_kf(kf, uv); }
 std::unique_ptr<PlaceRecognizer> make_py_recognizer(std::shared_ptr<LoopServer> srv, double min_sim) {
   return std::make_unique<PyRecognizer>(std::move(srv), min_sim);
 }
@@ -476,13 +539,26 @@ void LoopCloser::process(int kf, const cv::Mat& img) {
   }
   if (anchor_) {  // metric depth (DA3) vs VO 깊이 -> 이 키프레임의 VO 단위/미터
     anchor_->add(kf, img);
-    if (const auto av = anchor_->anchor(kf, subsample(st.uvd, 300))) {
+    const std::vector<Vec3> uvd = subsample(st.uvd, 300);
+    std::vector<double> z;
+    if (const auto av = anchor_->anchor(kf, uvd, &z)) {
       anchors_[kf] = *av, ++n_anchors;
+      st.da3_scale = *av;
       if (first_anchors_.size() < 10) {
         first_anchors_.push_back(*av);
         std::vector<double> f = first_anchors_;
         std::nth_element(f.begin(), f.begin() + f.size() / 2, f.end());
         if (first_anchors_.size() == 10) a_ref_ = f[f.size() / 2];
+      }
+      if (vo_.prm.ba_depth_sigma > 0) {  // local BA 의 점 깊이 prior 용 (subsample 과 같은 순서로 점 id)
+        std::vector<std::pair<int, float>> d;
+        for (size_t m = 0; m < z.size(); ++m)
+          if (z[m] > 0) d.emplace_back(st.pid[m * st.pid.size() / z.size()], float(z[m]));
+        auto l = take_map();
+        const auto tb = Clock::now();
+        vo_.da3[kf] = std::move(d);
+        vo_.da3_ref = a_ref_;
+        blocked(ms_since(tb));
       }
     }
   }
@@ -502,11 +578,16 @@ void LoopCloser::process(int kf, const cv::Mat& img) {
             ++n_excluded;
             continue;
           }
-          if (auto e = ver_->verify(a, j); e && (!best || e->inliers > best->inliers)) best = e;
+          // 로컬 3D 루프가 있으면 그것 (더 정확), 같은 종류끼리는 인라이어 많은 것
+          if (auto e = ver_->verify(a, j); e && (!best || (best->da3 && !e->da3) || (best->da3 == e->da3 && e->inliers > best->inliers)))
+            best = e;
         }
       }
     }
   }
+  // DA3 3D 루프는 새 재방문의 첫 연결용: 직전 루프 엣지와 kDa3Gap 프레임 안이면 버림 (06: 재방문 구간마다 수십 개가 쌓여 PGO 가 흔들림)
+  constexpr int kDa3Gap = 100;
+  if (best && best->da3 && !edges_.empty() && best->i - edges_.back().i < kDa3Gap) best.reset();
   ms_detect += ms_since(t0);
   // ORB-SLAM3 식 연속 일관성 (mnLoopNumCoincidences): 연속으로 질의한 키프레임들이 같은 장소를 가리켜야 채택.
   // 앞의 검출은 보류했다가 확정되면 같이 넣음, 확정된 사슬이 이어지는 동안은 바로 채택
@@ -555,7 +636,7 @@ void LoopCloser::process(int kf, const cv::Mat& img) {
     const Pose Pa = at_sub(a), Pj = at_sub(best->j);
     const Eigen::Matrix<double, 7, 1> r =
         (g2o::Sim3(best->S.R, best->S.t, best->S.s) * g2o::Sim3(Pj.R, Pj.t, 1.0) * g2o::Sim3(Pa.R, Pa.t, 1.0).inverse()).log();
-    chi2_new = r.dot(kInfoLoop * r);
+    chi2_new = r.dot((best->da3 ? kInfoLoopDa3 : kInfoLoop) * r);
   }
   if (best && !anchor_due && chi2_new < prm_.skip_chi2) {
     ++n_pgo_skipped;
@@ -625,7 +706,7 @@ std::unordered_map<int, Sim3> LoopCloser::pgo(const std::vector<Pose>& P, const 
   };
   for (size_t n = 0; n + 1 < sub.size(); ++n) add_edge(sub[n], sub[n + 1], odom_[sub[n]], kInfoOdom);
   for (const auto& e : edges_)
-    if (v.count(e.i) && v.count(e.j)) add_edge(e.j, e.i, e.S, kInfoLoop);
+    if (v.count(e.i) && v.count(e.j)) add_edge(e.j, e.i, e.S, e.da3 ? kInfoLoopDa3 : kInfoLoop);
   if (a_ref_ > 0)  // metric depth 앵커: log s_k = log a_k - log a_ref (보정 뒤 VO 단위/미터 a_k / s_k = a_ref)
     for (const auto& [f, ak] : anchors_)
       if (v.count(f) && f != sub.front()) {

@@ -43,6 +43,18 @@ class EdgeEpipolar : public g2o::BaseUnaryEdge<1, double, g2o::VertexSE3Expmap> 
   bool read(std::istream&) override { return false; }
   bool write(std::ostream&) const override { return false; }
 };
+
+// 점의 키프레임 깊이 prior: log z_c - log(측정 깊이). 정점 = 점, 키프레임 T_cw. Jacobian 은 g2o 기본 (수치 미분)
+class EdgeLogDepth : public g2o::BaseBinaryEdge<1, double, g2o::VertexPointXYZ, g2o::VertexSE3Expmap> {
+ public:
+  void computeError() override {
+    const Vec3 Xc = static_cast<const g2o::VertexSE3Expmap*>(_vertices[1])->estimate().map(
+        static_cast<const g2o::VertexPointXYZ*>(_vertices[0])->estimate());
+    _error[0] = std::log(std::max(Xc(2), 1e-6)) - _measurement;
+  }
+  bool read(std::istream&) override { return false; }
+  bool write(std::ostream&) const override { return false; }
+};
 }  // namespace
 
 Pose hybrid_ba(const Camera& c, const Pose& init, const MapObs& m, const Pose& prev,
@@ -180,6 +192,7 @@ struct LocalBAProblem {
   struct LObs { EdgeLineProjection* e; int j; };
   std::vector<Obs> edges;
   std::vector<LObs> ledges;
+  std::vector<std::pair<EdgeLogDepth*, int>> dedges;  // DA3 깊이 prior (엣지, 점 id)
   std::unordered_map<int, g2o::VertexPointXYZ*> vp;
   std::unordered_map<int, VertexLineOrth*> vl;
   LocalBAStats st;
@@ -267,6 +280,24 @@ LocalBAPtr local_ba_build(const VOTracker& vo, int window, int max_fixed, bool l
       P->edges.push_back({e, j});
     }
   }
+  // DA3 깊이 prior: 키프레임이 보는 점의 깊이 = da3_ref x DA3 깊이 (BA 가 창의 스케일을 흘리지 못하게)
+  if (vo.prm.ba_depth_sigma > 0 && vo.da3_ref > 0)
+    for (auto& [f, v] : vk)
+      if (const auto it = vo.da3.find(f); it != vo.da3.end())
+        for (const auto& [j, z] : it->second)
+          if (const auto p = P->vp.find(j); p != P->vp.end()) {
+            auto* e = new EdgeLogDepth();
+            e->setVertex(0, p->second);
+            e->setVertex(1, v);
+            e->setMeasurement(std::log(vo.da3_ref * z));
+            e->setInformation(Eigen::Matrix<double, 1, 1>::Constant(1 / (vo.prm.ba_depth_sigma * vo.prm.ba_depth_sigma)));
+            auto* rk = new g2o::RobustKernelHuber();
+            rk->setDelta(std::sqrt(3.841));  // 1 DoF 95 %
+            e->setRobustKernel(rk);
+            opt.addEdge(e);
+            P->dedges.emplace_back(e, j);
+          }
+  P->st.depth_priors = P->dedges.size();
   // 라인: 창 키프레임이 보고, 창 + 고정 키프레임에서 2번 이상 관측된 맵 라인
   if (lines) {
     std::unordered_set<int> ls;
@@ -328,6 +359,13 @@ void local_ba_solve(LocalBAProblem& P) {
   for (auto& o : P.ledges)  // 라인도 같은 기준 (끝점 거리 2개 = 2 DoF)
     if (o.e->computeError(), o.e->chi2() > kBaChi2) o.e->setLevel(1);
     else o.e->setRobustKernel(nullptr);
+  {  // 재투영 인라이어가 하나도 안 남은 점은 깊이 prior 도 빼기 (prior 만으로는 점 3-DoF 가 안 정해짐)
+    std::unordered_set<int> live;
+    for (auto& o : P.edges)
+      if (o.e->level() == 0) live.insert(o.j);
+    for (auto& [e, j] : P.dedges)
+      if (!live.count(j)) e->setLevel(1);
+  }
   {  // BA 전 오차: 같은 (인라이어) 관측을 build 때 포즈/점으로 계산하고 1차 결과로 되돌림
     std::unordered_map<int, g2o::SE3Quat> pk;
     std::unordered_map<int, Vec3> pp;

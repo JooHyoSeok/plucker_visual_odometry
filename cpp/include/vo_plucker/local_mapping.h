@@ -21,7 +21,7 @@ class LocalMapper {
 
   // 통계 (finish() 뒤에 읽기)
   int n_ba = 0, n_discarded = 0, n_dropped = 0;
-  long points = 0, outliers = 0, lines_used = 0, line_outliers = 0;
+  long points = 0, outliers = 0, lines_used = 0, line_outliers = 0, depth_priors = 0;
   double ms_solve = 0, ms_blocked = 0, ms_blocked_max = 0, rms_before = 0, rms_after = 0;
 
  private:

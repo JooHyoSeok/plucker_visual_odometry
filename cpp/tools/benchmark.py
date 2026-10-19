@@ -5,6 +5,7 @@ Benchmark run_vo over many sequences at once, so changes are judged on medians i
            icra   -> ICRA Stray Scanner sequences (rgb.mp4 + odometry.csv + camera_matrix.csv),
                      --resize 0.5 --stride 2 --init-min-points 50, start = first frame with GT speed > 0.3 m/s
                      (pure in-place rotation at the start cannot be initialized by monocular VO)
+           euroc  -> EuRoC MAV cam0 after cpp/tools/euroc_to_kitti.py (undistorted images, camera GT), not in the default
   modes  : mono (all), depth (icra: iPhone LiDAR depth/, confidence >= 1)
   metric : on the tracked part (from the first pose until tracking stops)
            drift % = Sim(3)-aligned ATE RMSE / GT path length * 100, ok = tracked >= 95 % of frames
@@ -35,6 +36,7 @@ HERE = Path(__file__).resolve().parent
 KITTI = Path.home() / "Desktop/hyoseok/KITTI_Dataset/dataset/sequences"
 KITTI_GT = Path.home() / "Desktop/hyoseok/KITTI_poses/dataset/poses"
 ICRA = Path.home() / "Desktop/hyoseok/2026_ICRA_Dataset/ICRA_Final_Dataset"
+EUROC = Path.home() / "Desktop/hyoseok/EuRoC"  # */SEQ/kitti/ = cpp/tools/euroc_to_kitti.py 출력
 FIELDS = ["suite", "seq", "mode", "frames", "tracked", "tracked_pct", "path_m", "ate_sim3_m", "drift_pct",
           "t_rel_pct", "r_rel_deg100m", "scale_trend_pct_km", "ate_se3_m", "scale", "fps", "fail"]
 
@@ -47,6 +49,15 @@ def kitti_jobs(seqs):
         P = [float(x) for x in open(KITTI / s / "calib.txt").readline().split()[1:]]
         yield dict(suite="kitti", seq=s, mode="mono", gt=KITTI_GT / f"{s}.txt", stride=1, start=0,
                    args=["--video", f"{KITTI / s / img}/%06d.png", "--calib", f"{P[0]},{P[5]},{P[2]},{P[6]}"])
+
+
+def euroc_jobs(seqs):
+    for d in sorted(p.parent.parent for p in EUROC.glob("*/*/kitti/poses.txt")):
+        if not re.search(seqs, d.name):
+            continue
+        fx, fy, cx, cy = (d / "kitti" / "calib.txt").read_text().split()
+        yield dict(suite="euroc", seq=d.name, mode="mono", gt=d / "kitti" / "poses.txt", stride=1, start=0,
+                   args=["--video", f"{d / 'kitti' / 'image_0'}/%06d.png", "--calib", f"{fx},{fy},{cx},{cy}"])
 
 
 def icra_jobs(seqs, modes, out):
@@ -197,7 +208,7 @@ def main():
         return compare(*o.compare)
     if o.reeval:
         out = Path(o.reeval)
-        jobs = list(kitti_jobs(".")) + list(icra_jobs(".", ["mono", "depth"], out))
+        jobs = list(kitti_jobs(".")) + list(euroc_jobs(".")) + list(icra_jobs(".", ["mono", "depth"], out))
         rows = [evaluate(j, out / f"{j['suite']}_{j['seq']}_{j['mode']}.txt",
                          (out / f"{j['suite']}_{j['seq']}_{j['mode']}.log").read_text(), 0)
                 for j in jobs if (out / f"{j['suite']}_{j['seq']}_{j['mode']}.log").exists()]
@@ -212,6 +223,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     suites, modes = o.suite.split(","), o.modes.split(",")
     jobs = (list(kitti_jobs(o.seqs)) if "kitti" in suites and "mono" in modes else []) + \
+           (list(euroc_jobs(o.seqs)) if "euroc" in suites and "mono" in modes else []) + \
            (list(icra_jobs(o.seqs, modes, out)) if "icra" in suites else [])
     print(f"{len(jobs)} runs, {o.jobs} in parallel, run_vo = {o.run_vo} {o.args}")
     t0 = time.time()

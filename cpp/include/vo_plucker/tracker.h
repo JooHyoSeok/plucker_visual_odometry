@@ -82,7 +82,9 @@ struct TrackerParams {
   int ba_window = 10;         // local BA에서 최적화하는 최근 키프레임 수
   int ba_fixed = 10;          // 같은 점을 보는 그 앞 키프레임을 최대 이만큼 고정
   bool ba_lines = false;      // local BA 에 라인도 (orthonormal 4-DoF, 해석 Jacobian)
+  bool depth_init = false;    // 깊이가 붙은 첫 프레임 하나로 초기화 (점은 고정 안 함, 시차가 생기면 삼각측량으로 교체), 그 뒤 단안
   bool ba_mature_only = false; // local BA 에 성숙한 점만
+  double ba_depth_sigma = 0;  // local BA 에 DA3 점 깊이 prior (log 깊이 표준편차, 0 = 끔. --depth-prior da3 의 앵커 깊이 사용)
   bool keyframes = false;     // 매핑과 상관없이 키프레임 목록 유지 (루프 클로저용)
 };
 
@@ -115,12 +117,16 @@ class VOTracker {
   std::vector<int> kfs;  // 키프레임 번호 (오름차순)
   int map_version = 0;   // 루프/앵커 보정이 맵을 바꿀 때마다 +1 (map lock 아래) -> 그 전에 만든 local BA 결과는 버림
   MapLock map_lock;
+  // DA3 앵커 때 루프 스레드가 map lock 아래 기록: 키프레임 -> (맵 점 id, DA3 깊이 [m]), da3_ref = 기준 VO 단위/미터 (0 = 아직)
+  std::unordered_map<int, std::vector<std::pair<int, float>>> da3;
+  double da3_ref = 0;
   int n_still = 0;       // 정지로 판정한 프레임 수
   int n_map6dof = 0;     // parallax가 작아서 맵 기준 6-DoF로 추정한 프레임 수
+  int n_rescued = 0;     // 2D-2D 포즈가 맵과 안 맞아서 맵 기준 6-DoF 로 다시 푼 프레임 수 (안 그러면 추적 실패)
   long n_depth_pts = 0;  // 깊이로 만든 맵 점 수
   int n_ba = 0;          // local BA 실행 수
   double ba_ms = 0;      // local BA 누적 시간
-  long ba_points = 0, ba_outliers = 0, ba_lines_used = 0, ba_line_outliers = 0;
+  long ba_points = 0, ba_outliers = 0, ba_lines_used = 0, ba_line_outliers = 0, ba_depth_priors = 0;
   double ba_rms_before = 0, ba_rms_after = 0;  // 누적 (실행 수로 나누면 평균)
   int failed_at = -1;  // tracking 실패 프레임 (-1 = 정상), 실패 후에는 추적 안 함 (relocalization 없음)
   std::string fail_reason;

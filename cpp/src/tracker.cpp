@@ -87,7 +87,7 @@ std::vector<int> VOTracker::add(FrameObs o, const std::optional<Pose>& r, const 
   if (r) rel[k] = *r;
   if (failed_at >= 0) return {};
   if (init_frame_ >= 0) return track(k) ? std::vector<int>{k} : std::vector<int>{};
-  if (prm.use_depth) {  // 깊이 초기화: 깊이 있는 점이 충분한 첫 프레임 = world (그 전 프레임은 포즈 없음)
+  if (prm.use_depth || (prm.depth_init && !obs[k].depth.empty())) {  // 깊이 초기화: 깊이 있는 점이 충분한 첫 프레임 = world
     int nd = 0;
     for (float d : obs[k].depth) nd += std::isfinite(d);
     if (nd < prm.init_min_points) return {};
@@ -128,7 +128,8 @@ void VOTracker::add_depth_points(int k) {
     const int j = o.pid[i];
     if (!std::isfinite(o.depth[i]) || mature_p.count(j)) continue;
     map_p[j] = p.R.transpose() * (double(o.depth[i]) * (cam.Kinv * Vec3(o.uv[i](0), o.uv[i](1), 1.0)) - p.t);
-    mature_p.insert(j), ++n_depth_pts;
+    if (prm.use_depth) mature_p.insert(j);  // LiDAR 깊이는 고정, --da3-init 점은 시차가 생기면 삼각측량으로 바뀜
+    ++n_depth_pts;
   }
 }
 
@@ -276,6 +277,19 @@ bool VOTracker::track(int k) {
   // outlier culling: 이 프레임에서 크게 안 맞는 랜드마크는 맵에서 빼고(다시 삼각측량 대상) 포즈 재추정
   VecX r = residuals(cam, p1, m);
   const int np_ = pid.size();
+  auto n_inliers = [&](const VecX& rr) {  // 아래 컬링과 같은 기준
+    int c = 0;
+    for (int i = 0; i < np_; ++i) c += rr.segment<2>(2 * i).norm() < prm.outlier_px;
+    for (size_t i = 0; i < lid.size(); ++i)
+      c += std::max(std::abs(rr(2 * np_ + 2 * i)), std::abs(rr(2 * np_ + 2 * i + 1))) < prm.outlier_px;
+    return c;
+  };
+  // 2D-2D + 맵 스케일 포즈가 맵과 거의 안 맞으면 (그대로면 컬링이 맵을 지우고 실패) 예측 포즈에서 맵 기준 6-DoF 로 다시
+  if (rit != rel.end() && n_inliers(r) < 6) {
+    const Pose q = prm.pose_g2o ? motion_only_ba(cam, p0, m) : estimate_pose(cam, p0, m);
+    const VecX rq = residuals(cam, q, m);
+    if (rq.allFinite() && n_inliers(rq) > n_inliers(r)) p1 = q, r = rq, rit = rel.end(), ++n_rescued;
+  }
   MapObs kept;
   bool culled = false;
   for (int i = 0; i < np_; ++i) {
@@ -318,7 +332,7 @@ bool VOTracker::track(int k) {
   if (kf && prm.local_ba) {
     const LocalBAStats s = vp::local_ba(*this, prm.ba_window, prm.ba_fixed, prm.ba_lines && prm.use_lines, prm.ba_mature_only);
     ++n_ba, ba_ms += s.ms, ba_points += s.points, ba_outliers += s.outliers;
-    ba_lines_used += s.lines, ba_line_outliers += s.line_outliers;
+    ba_lines_used += s.lines, ba_line_outliers += s.line_outliers, ba_depth_priors += s.depth_priors;
     ba_rms_before += s.rms_before, ba_rms_after += s.rms_after;
   }
   return true;
