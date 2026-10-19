@@ -224,7 +224,8 @@ FrameObs Frontend::step(const cv::Mat& g) {
 
   prev_ = g.clone();
   ++k_;
-  hist_.push_back(prev_);
+  hist_.emplace_back();
+  cv::buildOpticalFlowPyramid(prev_, hist_.back(), kWin, kMaxLevel, true);  // reattach가 프레임마다 다시 안 만들게 캐싱
   if (int(hist_.size()) > prm.reattach_frames + 1) hist_.erase(hist_.begin());
   FrameObs o;
   o.pid = pid;
@@ -272,7 +273,7 @@ int Frontend::reattach(const Camera& cam, const VOTracker& vo, const Pose& pred,
   };
 
   // 2) 마지막으로 본 프레임 영상 -> 현재 영상 KLT
-  const cv::Mat& cur = hist_.back();
+  const std::vector<cv::Mat>& cur = hist_.back();
   int added = 0;
   for (auto& [f, cands] : by_frame) {
     const int h = int(hist_.size()) - 1 - (k - f);
@@ -287,7 +288,7 @@ int Frontend::reattach(const Camera& cam, const VOTracker& vo, const Pose& pred,
     for (size_t i = 0; i < cands.size(); ++i) {
       const cv::Point2f& p = p1[i];
       if (!s1[i] || !s2[i] || cv::norm(p0[i] - p0b[i]) > 1.0 || cv::norm(p - cands[i].guess) > prm.reattach_px ||
-          p.x < 0 || p.x >= cur.cols || p.y < 0 || p.y >= cur.rows)
+          p.x < 0 || p.x >= cam.W || p.y < 0 || p.y >= cam.H)
         continue;
       const int ni = near(p);
       if (ni >= 0) {

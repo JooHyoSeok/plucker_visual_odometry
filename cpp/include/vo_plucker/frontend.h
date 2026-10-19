@@ -40,7 +40,7 @@ class Frontend {
  private:
   cv::Ptr<cv::LineSegmentDetector> lsd_;
   cv::Mat prev_;
-  std::vector<cv::Mat> hist_;  // 최근 reattach_frames+1 장 (hist_.back() = 현재 프레임)
+  std::vector<std::vector<cv::Mat>> hist_;  // 최근 reattach_frames+1 장의 KLT 피라미드 (back() = 현재 프레임)
   int k_ = -1;                 // 현재 프레임 번호
   int next_p_ = 0, next_l_ = 0;
 };

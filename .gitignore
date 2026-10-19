@@ -4,3 +4,4 @@ out_*/
 *.avi
 build/
 .cache/
+build_dev/
