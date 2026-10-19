@@ -19,6 +19,17 @@ target_compile_options(vo_plucker PRIVATE -Wall -Wextra)
 add_executable(run_vo apps/run_vo.cpp)
 target_link_libraries(run_vo vo_plucker)
 
+# viewer (optional): cmake ... -DPangolin_DIR=<Pangolin build or install dir>
+find_package(Pangolin QUIET)
+if(Pangolin_FOUND)
+  add_library(vo_plucker_viewer src/viewer.cpp)
+  target_link_libraries(vo_plucker_viewer PUBLIC vo_plucker ${Pangolin_LIBRARIES})
+  target_compile_definitions(run_vo PRIVATE VP_WITH_VIEWER)
+  target_link_libraries(run_vo vo_plucker_viewer)
+else()
+  message(STATUS "Pangolin not found: run_vo without viewer (set -DPangolin_DIR=...)")
+endif()
+
 add_executable(test_tracker tests/test_tracker.cpp)
 target_link_libraries(test_tracker vo_plucker)
 add_executable(test_frontend tests/test_frontend.cpp)
