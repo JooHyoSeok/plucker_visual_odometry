@@ -487,6 +487,7 @@ void LoopCloser::process(int kf, const cv::Mat& img) {
     const auto tb = Clock::now();
     correct(S_kf, sub);
     at = int(vo_.poses.size()) - 1;
+    ++n_corrections;
     blocked(ms_since(tb));
   }
   std::printf("    loop @frame %d <-> %d: %d Sim(3) inliers, scale ratio %.2f, edge chi2 %.1f -> PGO cost %.1f", a,

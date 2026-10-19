@@ -115,6 +115,7 @@ class LoopCloser {
   double ms_blocked = 0, ms_blocked_max = 0;  // 루프 스레드가 map lock 을 잡은 시간 = 트래킹이 멈춘 시간
   int n_queries = 0, n_skipped = 0;            // n_skipped: 루프 스레드가 밀려서 버린 키프레임
   int n_pgo_skipped = 0;                       // 이미 맞는 루프라 PGO 생략
+  std::atomic<int> n_corrections{0};           // 맵 보정을 써넣은 횟수 (트래킹 스레드가 map lock 아래에서 읽음)
 
  private:
   void run();

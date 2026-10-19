@@ -36,7 +36,7 @@ KITTI = Path.home() / "Desktop/hyoseok/KITTI_Dataset/dataset/sequences"
 KITTI_GT = Path.home() / "Desktop/hyoseok/KITTI_poses/dataset/poses"
 ICRA = Path.home() / "Desktop/hyoseok/2026_ICRA_Dataset/ICRA_Final_Dataset"
 FIELDS = ["suite", "seq", "mode", "frames", "tracked", "tracked_pct", "path_m", "ate_sim3_m", "drift_pct",
-          "t_rel_pct", "r_rel_deg100m", "ate_se3_m", "scale", "fps", "fail"]
+          "t_rel_pct", "r_rel_deg100m", "scale_trend_pct_km", "ate_se3_m", "scale", "fps", "fail"]
 
 
 def kitti_jobs(seqs):
@@ -99,6 +99,19 @@ def kitti_rpe(Pe, Pg, s, lengths=range(100, 801, 100), step=10):
     return (100 * np.mean(te), np.degrees(np.mean(re)) * 100) if te else (np.nan, np.nan)
 
 
+def scale_trend(C, G, win=200):
+    """systematic scale drift [%/km]: local scale = VO path / GT path over `win` frames (median-normalized),
+    log-linear fit against distance travelled. 0 = no trend (random-walk drift averages out), nan if path < 300 m"""
+    d = np.r_[0, np.cumsum(np.linalg.norm(np.diff(G, axis=0), axis=1))]
+    lc = np.r_[0, np.cumsum(np.linalg.norm(np.diff(C, axis=0), axis=1))]
+    ks = [k for k in range(len(G) - win) if d[k + win] - d[k] > 20]  # 거의 정지한 창 제외
+    if d[-1] < 300 or len(ks) < 10:
+        return np.nan
+    loc = np.array([(lc[k + win] - lc[k]) / (d[k + win] - d[k]) for k in ks])
+    slope = np.polyfit(d[ks] / 1000, np.log(loc / np.median(loc)), 1)[0]
+    return float(100 * (np.exp(slope) - 1))
+
+
 def evaluate(job, traj, log, wall):
     m = re.search(r"(\d+)/(\d+) frames tracked", log)
     tracked, frames = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
@@ -108,7 +121,7 @@ def evaluate(job, traj, log, wall):
     row = dict(suite=job["suite"], seq=job["seq"], mode=job["mode"], frames=frames, tracked=tracked,
                tracked_pct=100 * tracked / max(frames, 1), fps=fps, fail=fail.group(1) if fail else "",
                path_m=0, ate_sim3_m=np.nan, drift_pct=np.nan, t_rel_pct=np.nan, r_rel_deg100m=np.nan,
-               ate_se3_m=np.nan, scale=np.nan)
+               scale_trend_pct_km=np.nan, ate_se3_m=np.nan, scale=np.nan)
     if tracked < 3 or not traj.exists():
         return row
     Pe = np.loadtxt(traj).reshape(-1, 3, 4)
@@ -116,6 +129,7 @@ def evaluate(job, traj, log, wall):
     Pe = Pe[:len(P)]
     C, G = Pe[:, :, 3], P[:, [3, 7, 11]]
     row["path_m"] = float(np.linalg.norm(np.diff(G, axis=0), axis=1).sum())
+    row["scale_trend_pct_km"] = scale_trend(C, G)
     for with_scale in (True, False):
         mc, mg = C.mean(0), G.mean(0)
         X, Y = C - mc, G - mg
@@ -146,10 +160,11 @@ def summarize(rows):
         d = np.array([r["drift_pct"] for r in g], float)
         tr = np.array([r["t_rel_pct"] for r in g], float)
         rr = np.array([r["r_rel_deg100m"] for r in g], float)
+        st = np.array([r["scale_trend_pct_km"] for r in g], float)
         ok = sum(r["tracked_pct"] >= 95 for r in g)
         print(f"[{key[0]} {key[1]}] {len(g)} runs | tracked >= 95%: {ok}/{len(g)} | drift % median {np.nanmedian(d):.2f}, "
               f"mean {np.nanmean(d):.2f} | t_rel % median {np.nanmedian(tr):.2f} | r_rel deg/100m median "
-              f"{np.nanmedian(rr):.3f} | mean fps {np.mean([float(r['fps']) for r in g]):.1f}")
+              f"{np.nanmedian(rr):.3f} | scale trend %/km median {np.nanmedian(st):+.1f} | mean fps {np.mean([float(r['fps']) for r in g]):.1f}")
 
 
 def compare(a, b):

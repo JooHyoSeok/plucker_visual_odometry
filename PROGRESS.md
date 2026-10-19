@@ -131,3 +131,18 @@
 - 전체 06 실행 6~8분, `--ba` 추가 시 약 10분 더.
 - KITTI 내부 파라미터: 00–02 `718.856,718.856,607.1928,185.2157`, 03 `721.5377,721.5377,609.5593,172.854`, 04–12 `707.0912,707.0912,601.8873,183.1104`.
 - 튜닝 위치: `vo_kitti.py`(`MAX_PTS`, `MAX_LINES`, `MIN_LINE_LEN`, `v.INIT_FRAME`, `v.TRI_GAP`), `loop_closure.py`(`MIN_GAP`, `SHORTLIST`, `MIN_SIM3_INLIERS`, `W_ODOM`, `W_LOOP`), `local_ba.py`(`WINDOW`, `EXTRA_FIXED`, `N_FIXED`).
+
+---
+
+## 9. C++ 로드맵 진행 (2026-10-20~, 단계별 기록)
+판단은 `--loop-sync`(결정적) KITTI 00–10 벤치마크 중앙값으로 함: drift %, t_rel %, r_rel, 스케일 추세 %/km (`benchmark.py`, 창 200프레임의 VO/GT 이동거리 비를 거리에 대해 로그-선형 회귀. 0 = 체계적 드리프트 없음).
+영상: `out_bench/videos/stageN_*.mp4` (`cpp/tools/make_video.py`, run_vo `--traj-online`), ORB-SLAM 비교: `cpp/tools/plot_vs_orbslam.py`.
+
+### Stage 0. 기준선 (현재 코드: 점+라인 VO + 루프 thumb/ORB/Sim(3) PGO)
+| KITTI 00–10 중앙값 | drift % | t_rel % | 스케일 추세 %/km |
+|---|---|---|---|
+| 루프 없음 (`out_bench/S0_noloop`) | 2.20 | 12.22 | +68.9 |
+| 루프 동기식 (`out_bench/S0_loop_sync`) | 1.31 | 7.15 | +21.0 |
+- Sim(3) ATE vs ORB-SLAM(TRO 2015, mono): 00 5.9 vs 6.7, 05 7.7 vs 8.2, 04 0.3 vs 1.8로 앞서고, 02 59 vs 22, 06 23 vs 15, 07 15 vs 3.4, 09 43 vs 7.6, 08 82 vs 47로 뒤짐 (3/10).
+- 루프가 잡힌 시퀀스: 00(79), 02(15), 05(50), 06(49). 07, 09(끝에서 출발점 복귀)는 썸네일 검색이 못 잡음 → Stage 3 과제.
+- 스케일 추세가 10개 중 8개에서 양수(+20~+160 %/km): 랜덤워크가 아니라 프레임당 이동량을 점점 크게 추정하는 체계적 편향 → Stage 1.

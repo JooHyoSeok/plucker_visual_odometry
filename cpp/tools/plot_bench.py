@@ -22,7 +22,7 @@ REF = "#9a9994"                                              # reference variant
 SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]   # categorical slots, fixed order
 INK, INK2, GRID, SURFACE = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
 LABELS = {"drift_pct": "drift %  (Sim(3) ATE / path)", "t_rel_pct": "t_rel %  (KITTI, 100-800 m)",
-          "r_rel_deg100m": "r_rel deg/100m  (KITTI)"}
+          "r_rel_deg100m": "r_rel deg/100m  (KITTI)", "scale_trend_pct_km": "scale trend %/km  (0 = no systematic drift)"}
 
 
 def load(d):
@@ -66,7 +66,8 @@ def main():
                 if clip:
                     ax.text(pos, ymax, f"{d:.0f}", ha="center", va="bottom", color=INK2, fontsize=7, rotation=90)
         if ymax is not None:
-            ax.set_ylim(0, ymax * 1.12)
+            ymin = min(0, np.nanmin([val(r, k) for _, r in runs for k in keys]))  # 음수 가능한 지표 (스케일 추세)
+            ax.set_ylim(ymin * 1.12, ymax * 1.12)
         ax.set_xticks(x, [k[1] if k[0] == "kitti" else f"{k[1]}\n{k[2]}" for k in keys])
         ax.set_ylabel(LABELS.get(met, met))
         ax.grid(axis="y", color=GRID, linewidth=0.8)

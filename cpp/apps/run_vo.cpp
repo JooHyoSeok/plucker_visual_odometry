@@ -1,7 +1,7 @@
 // C++ monocular VO (points + Plücker lines): images in one by one -> pose out. Optional loop closure + Sim(3) PGO (--loop, pluggable modules).
 // usage: run_vo [n_frames] --video PATH|CAM_INDEX [--gt PATH] [--calib fx,fy,cx,cy] [--no-lines] [--traj OUT.txt]
 //               [--init-frame N | --init-px P] [--kf-mapping] [--no-reattach]
-//               [--rel-static] [--drop-dynamic] [--rel-min-px P] [--resize S] [--stride N] [--start N] [--min-parallax DEG] [--init-min-points N] [--sim3-align] [--pose-g2o] [--local-ba] [--ba-window N] [--ba-fixed N] [--kf-parallax PX] [--loop] [--loop-pr thumb|netvlad|salad|mast3r] [--loop-ver orb|mast3r|orb+mast3r] [--loop-python PY] [--loop-min-sim S] [--loop-shortlist N] [--loop-min-gap N] [--loop-no-feedback] [--loop-sync] [--loop-skip-chi2 X] [--autostart] [--no-viewer] [--snapshot OUT.png]
+//               [--rel-static] [--drop-dynamic] [--rel-min-px P] [--resize S] [--stride N] [--start N] [--min-parallax DEG] [--init-min-points N] [--sim3-align] [--pose-g2o] [--local-ba] [--ba-window N] [--ba-fixed N] [--kf-parallax PX] [--loop] [--loop-pr thumb|netvlad|salad|mast3r] [--loop-ver orb|mast3r|orb+mast3r] [--loop-python PY] [--loop-min-sim S] [--loop-shortlist N] [--loop-min-gap N] [--loop-no-feedback] [--loop-sync] [--loop-skip-chi2 X] [--autostart] [--traj-online OUT.txt] [--no-viewer] [--snapshot OUT.png]
 //   --resize S : 영상과 intrinsic을 S배 (고해상도 입력용, 예: iPhone 1920x1440 -> 0.5)
 //   --stride N : N 프레임마다 하나만 사용 (고 fps / 느린 이동용). GT도 같은 간격으로 맞춤
 //   --start N  : 처음 N 프레임 건너뛰기 (예: 시작이 제자리 회전뿐인 핸드헬드 영상). GT도 N부터
@@ -237,6 +237,16 @@ int main(int argc, char** argv) {
     loop = std::make_unique<LoopCloser>(vo, loop_pr == "thumb" ? make_thumbnail_recognizer() : make_py_recognizer(srv, loop_min_sim),
                                         std::move(ver), lprm);
   }
+  // --traj-online: 프레임마다 그 순간의 추정 포즈 (나중 루프 보정 전 값) "k T_wc(3x4)" -> 영상 도구용
+  //   + 루프 보정이 들어올 때마다 그 시점 전체 궤적 스냅샷 "k f x y z" (위치만) -> OUT_snap.txt
+  std::ofstream fon, fsnap;
+  if (const char* p = arg(argc, argv, "--traj-online", nullptr)) {
+    fon.open(p), fon.precision(9);
+    std::string sp(p);
+    sp = (sp.size() > 4 && sp.substr(sp.size() - 4) == ".txt" ? sp.substr(0, sp.size() - 4) : sp) + "_snap.txt";
+    fsnap.open(sp), fsnap.precision(7);
+  }
+  int snap_seen = 0;
   std::map<int, cv::Mat> recent_img;  // 키프레임 등록용 최근 영상 (BGR, 초기화 때 키프레임이 몇 프레임 늦게 정해짐)
   size_t kf_done = 0;
   double t_loop = 0;
@@ -288,6 +298,14 @@ int main(int argc, char** argv) {
       while (recent_img.size() > 40) recent_img.erase(recent_img.begin());
     }
     vo.add(std::move(o), rel, init);
+    if (fon.is_open() && vo.has_pose[k]) {
+      const Pose& p = vo.poses[k];
+      const Mat3 Rwc = p.R.transpose();
+      const Vec3 C = -Rwc * p.t;
+      fon << k;
+      for (int r = 0; r < 3; ++r) fon << " " << Rwc(r, 0) << " " << Rwc(r, 1) << " " << Rwc(r, 2) << " " << C(r);
+      fon << "\n";
+    }
     if (loop) {
       const auto tl = Clock::now();
       if (vo.kfs.size() < kf_done) kf_done = 0;  // 초기화 재시도로 키프레임 목록이 비워짐
@@ -295,6 +313,14 @@ int main(int argc, char** argv) {
         if (const auto it = recent_img.find(vo.kfs[kf_done]); it != recent_img.end() && vo.failed_at < 0)
           loop->push(vo.kfs[kf_done], it->second);
       t_loop += ms_since(tl);
+      if (fsnap.is_open() && loop->n_corrections != snap_seen) {  // map lock 아래라 보정 중간 상태는 안 보임
+        snap_seen = loop->n_corrections;
+        for (int f = 0; f <= k; ++f)
+          if (vo.has_pose[f]) {
+            const Vec3 C = center(vo.poses[f]);
+            fsnap << k << " " << f << " " << C(0) << " " << C(1) << " " << C(2) << "\n";
+          }
+      }
     }
     if (init && !was_init)
       std::printf("  init at frame %d: %s\n", k,
