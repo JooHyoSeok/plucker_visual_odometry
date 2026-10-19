@@ -1,7 +1,7 @@
 // C++ monocular VO (points + Plücker lines): images in one by one -> pose out. No loop closure yet.
 // usage: run_vo [n_frames] --video PATH|CAM_INDEX [--gt PATH] [--calib fx,fy,cx,cy] [--no-lines] [--traj OUT.txt]
 //               [--init-frame N | --init-px P] [--kf-mapping] [--no-reattach]
-//               [--rel-static] [--drop-dynamic] [--rel-min-px P] [--resize S] [--stride N] [--start N] [--min-parallax DEG] [--init-min-points N] [--no-viewer] [--snapshot OUT.png]
+//               [--rel-static] [--drop-dynamic] [--rel-min-px P] [--resize S] [--stride N] [--start N] [--min-parallax DEG] [--init-min-points N] [--sim3-align] [--no-viewer] [--snapshot OUT.png]
 //   --resize S : 영상과 intrinsic을 S배 (고해상도 입력용, 예: iPhone 1920x1440 -> 0.5)
 //   --stride N : N 프레임마다 하나만 사용 (고 fps / 느린 이동용). GT도 같은 간격으로 맞춤
 //   --start N  : 처음 N 프레임 건너뛰기 (예: 시작이 제자리 회전뿐인 핸드헬드 영상). GT도 N부터
@@ -187,7 +187,7 @@ int main(int argc, char** argv) {
   if (!flag(argc, argv, "--no-viewer")) {
     std::vector<Pose> gt_cw;
     for (const auto& T : gt) gt_cw.push_back(Pose{T.leftCols<3>().transpose(), -T.leftCols<3>().transpose() * T.col(3)});
-    viewer = std::make_unique<Viewer>(cam, gt_cw);
+    viewer = std::make_unique<Viewer>(cam, gt_cw, flag(argc, argv, "--sim3-align"));
   }
 #endif
 

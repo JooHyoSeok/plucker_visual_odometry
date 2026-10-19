@@ -1,6 +1,8 @@
 // Map viewer (Pangolin, own thread), like ORB-SLAM's Viewer + MapDrawer + FrameDrawer.
 //   top   : 3D map points (gray, visible = red), Plücker line segments (blue), trajectory (green),
 //           ground truth (gray, origin-anchored, scale from the first 50 frames), current camera
+//           "Sim3 align": Umeyama Sim(3) of the trajectory so far onto GT (as for ATE) -> everything drawn in GT
+//           coordinates, yellow segments = position error every 10 frames, ATE shown in the menu
 //   bottom: current image with tracked points / lines and the map reprojected into it
 // The tracking thread calls update() after every frame; drawing happens in the viewer thread.
 #pragma once
@@ -18,7 +20,7 @@ namespace vp {
 class Viewer {
  public:
   // gt_cw: 프레임별 GT T_cw (비워두면 GT 없음). 추정 궤적이 시작한 프레임의 GT 포즈를 원점으로 맞춰 그림
-  explicit Viewer(const Camera& cam, std::vector<Pose> gt_cw = {});
+  explicit Viewer(const Camera& cam, std::vector<Pose> gt_cw = {}, bool sim3_align = false);
   ~Viewer();
   void update(const cv::Mat& bgr, const VOTracker& vo);  // 추적 스레드: 방금 넣은 프레임 기준 스냅샷
   bool paused() const { return pause_; }
@@ -28,10 +30,13 @@ class Viewer {
 
  private:
   void run();
-  void draw_map(bool pts, bool lines, bool gt);
+  void draw_map(bool pts, bool lines, bool gt, const Eigen::Matrix4d* S);
+  // 지금까지 궤적 -> GT Sim(3) (X_gt = S X_vo), 대응 프레임 수 < 3이면 false
+  bool sim3_to_gt(Eigen::Matrix4d& S, double& ate) const;
 
   Camera cam_;
   std::vector<Pose> gt_cw_;
+  bool align_init_ = false;  // "Sim3 align" 체크박스 초기값
   int f0_ = -1;  // 처음 포즈가 생긴 프레임
   std::thread th_;
   std::atomic<bool> pause_{false}, closed_{false}, quit_{false};

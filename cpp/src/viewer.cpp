@@ -68,7 +68,8 @@ void draw_camera(const Pose& p, double w) {
 }
 }  // namespace
 
-Viewer::Viewer(const Camera& cam, std::vector<Pose> gt_cw) : cam_(cam), gt_cw_(std::move(gt_cw)) {
+Viewer::Viewer(const Camera& cam, std::vector<Pose> gt_cw, bool sim3_align)
+    : cam_(cam), gt_cw_(std::move(gt_cw)), align_init_(sim3_align) {
   th_ = std::thread(&Viewer::run, this);
 }
 
@@ -149,7 +150,22 @@ void Viewer::update(const cv::Mat& bgr, const VOTracker& vo) {
   }
 }
 
-void Viewer::draw_map(bool show_pts, bool show_lines, bool show_gt) {
+bool Viewer::sim3_to_gt(Eigen::Matrix4d& S, double& ate) const {
+  if (f0_ < 0) return false;
+  const int n = std::min<int>(traj_.size(), int(gt_cw_.size()) - f0_);
+  if (n < 3) return false;
+  Eigen::Matrix<double, 3, Eigen::Dynamic> X(3, n), Y(3, n);
+  for (int i = 0; i < n; ++i) X.col(i) = traj_[i], Y.col(i) = center(gt_cw_[f0_ + i]);
+  S = Eigen::umeyama(X, Y, true);
+  ate = std::sqrt(((S.topLeftCorner<3, 3>() * X).colwise() + S.topRightCorner<3, 1>() - Y).colwise().squaredNorm().mean());
+  return true;
+}
+
+void Viewer::draw_map(bool show_pts, bool show_lines, bool show_gt, const Eigen::Matrix4d* S) {
+  if (S) {  // 추정한 것들(점, 선, 궤적, 카메라)을 GT 좌표계로: Eigen은 column-major라 그대로 GL 행렬
+    glPushMatrix();
+    glMultMatrixd(S->data());
+  }
   if (show_pts) {
     glPointSize(1.5);
     glColor3f(0.55f, 0.55f, 0.55f);
@@ -174,7 +190,30 @@ void Viewer::draw_map(bool show_pts, bool show_lines, bool show_gt) {
     for (int j : segs_vis_) glVertex3dv(segs_[j].first.data()), glVertex3dv(segs_[j].second.data());
     glEnd();
   }
-  if (show_gt && f0_ >= 0 && f0_ < int(gt_cw_.size()) && traj_.size() > 1) {
+  glLineWidth(2.5);
+  glColor3f(0.2f, 0.9f, 0.2f);
+  glBegin(GL_LINE_STRIP);
+  for (const Vec3& C : traj_) glVertex3d(C(0), C(1), C(2));
+  glEnd();
+  if (has_cur_) draw_camera(cur_, 1.0);
+  if (S) glPopMatrix();
+
+  if (S && show_gt) {  // GT는 자기 world 좌표 그대로 + 프레임별 위치 오차 (10프레임마다)
+    const int n = std::min<int>(traj_.size(), int(gt_cw_.size()) - f0_);
+    glLineWidth(2);
+    glColor3f(0.85f, 0.85f, 0.85f);
+    glBegin(GL_LINE_STRIP);
+    for (size_t f = f0_; f < gt_cw_.size(); ++f) glVertex3dv(center(gt_cw_[f]).data());
+    glEnd();
+    glLineWidth(1);
+    glColor3f(1.0f, 0.85f, 0.2f);  // 노랑: 위치 오차 (빨강은 보이는 맵 점)
+    glBegin(GL_LINES);
+    for (int i = 0; i < n; i += 10) {
+      const Vec3 a = S->topLeftCorner<3, 3>() * traj_[i] + S->topRightCorner<3, 1>();
+      glVertex3dv(a.data()), glVertex3dv(center(gt_cw_[f0_ + i]).data());
+    }
+    glEnd();
+  } else if (show_gt && f0_ >= 0 && f0_ < int(gt_cw_.size()) && traj_.size() > 1) {
     // 원점 고정 정렬: 시작 프레임 GT 카메라 좌표로 옮기고, 스케일 하나만 처음 50프레임으로 (VO 단위로 GT를 맞춤)
     const Pose& g0 = gt_cw_[f0_];
     std::vector<Vec3> Y;
@@ -189,12 +228,6 @@ void Viewer::draw_map(bool show_pts, bool show_lines, bool show_gt) {
     for (const Vec3& y : Y) glVertex3d(y(0) / s, y(1) / s, y(2) / s);
     glEnd();
   }
-  glLineWidth(2.5);
-  glColor3f(0.2f, 0.9f, 0.2f);
-  glBegin(GL_LINE_STRIP);
-  for (const Vec3& C : traj_) glVertex3d(C(0), C(1), C(2));
-  glEnd();
-  if (has_cur_) draw_camera(cur_, 1.0);
 }
 
 void Viewer::run() {
@@ -208,7 +241,8 @@ void Viewer::run() {
   pangolin::CreatePanel("menu").SetBounds(img_frac, 1.0, 0.0, pangolin::Attach::Pix(PANEL));
   pangolin::Var<bool> follow("menu.Follow camera", true, true), show_pts("menu.Points", true, true),
       show_lines("menu.Lines", true, true), show_gt("menu.Ground truth", true, true), pause("menu.Pause", false, true),
-      top("menu.Top view", false, false);
+      top("menu.Top view", false, false), align("menu.Sim3 align", align_init_, true);
+  pangolin::Var<std::string> ate_txt("menu.ATE", "-");
   pangolin::OpenGlRenderState s_cam(pangolin::ProjectionMatrix(W, H, 600, 600, W / 2.0, H / 2.0, 0.1, 1e5),
                                     pangolin::ModelViewLookAt(0, -12, -25, 0, 0, 10, 0, -1, 0));
   const double map_aspect = -double(W - PANEL) / (H * (1 - img_frac));
@@ -226,15 +260,29 @@ void Viewer::run() {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     {
       std::lock_guard<std::mutex> lk(mu_);
-      if (has_cur_) last_twc = gl_twc(cur_);
-      if (pangolin::Pushed(top)) {  // 위에서 내려다보기 (KITTI: y가 아래 방향)
+      Eigen::Matrix4d S;
+      double ate = 0;
+      const bool aligned = align && sim3_to_gt(S, ate);
+      ate_txt = aligned ? cv::format("%.2f m s=%.2f", ate, std::cbrt(S.topLeftCorner<3, 3>().determinant())) : "-";
+      // 정렬 중이면 카메라도 GT 좌표계로 (Follow / Top view용, 회전과 위치만)
+      Pose view = has_cur_ ? cur_ : Pose{};
+      Mat3 R0 = Mat3::Identity();  // 시작 카메라 -> world (위쪽 = -카메라 y, 앞 = 카메라 z)
+      if (aligned) {
+        const double s = std::cbrt(S.topLeftCorner<3, 3>().determinant());
+        const Mat3 Rs = S.topLeftCorner<3, 3>() / s;
+        const Vec3 C = S.topLeftCorner<3, 3>() * center(view) + S.topRightCorner<3, 1>();
+        view.R = view.R * Rs.transpose(), view.t = -view.R * C;
+        R0 = gt_cw_[f0_].R.transpose();
+      }
+      if (has_cur_) last_twc = gl_twc(view);
+      if (pangolin::Pushed(top)) {  // 위에서 내려다보기 (카메라 y가 아래 방향인 차량/핸드헬드 기준)
         follow = false;
-        const Vec3 C = has_cur_ ? center(cur_) : Vec3::Zero();
-        s_cam.SetModelViewMatrix(pangolin::ModelViewLookAt(C(0), C(1) - 150, C(2), C(0), C(1), C(2), 0, 0, 1));
+        const Vec3 C = center(view), eye = C - 150 * R0.col(1), up = R0.col(2);
+        s_cam.SetModelViewMatrix(pangolin::ModelViewLookAt(eye(0), eye(1), eye(2), C(0), C(1), C(2), up(0), up(1), up(2)));
       }
       if (follow) s_cam.Follow(last_twc);
       d_cam.Activate(s_cam);
-      draw_map(show_pts, show_lines, show_gt);
+      draw_map(show_pts, show_lines, show_gt, aligned ? &S : nullptr);
       if (img_new_ && !img_.empty()) {
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);  // 행 바이트 수(W*3)가 4의 배수가 아니면 기본 정렬(4)로는 영상이 기울어짐
         tex.Upload(img_.data, GL_BGR, GL_UNSIGNED_BYTE), img_new_ = false;
