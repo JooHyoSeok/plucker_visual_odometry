@@ -2,6 +2,7 @@
 //   rotation + translation direction from 2D-2D (given per frame as rel), translation magnitude from the map
 //   mapping: N-view triangulation of points / lines until parallax > mature_deg, then frozen
 #pragma once
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -41,6 +42,8 @@ class VOTracker {
   // rel = (R_rel, t방향) k-1 -> k, init = (R, t) frame 0 -> init_frame (k == init_frame일 때 필수)
   // 반환: 이번 호출에서 포즈가 정해진 프레임 번호
   std::vector<int> add(FrameObs o, const std::optional<Pose>& rel, const std::optional<Pose>& init);
+  // 다음 프레임(obs.size())의 constant-velocity 예측 포즈. 직전 두 프레임 포즈가 없으면 nullopt
+  std::optional<Pose> predict() const;
 
   // state: 바깥(local BA, 루프 보정)에서 제자리 수정 가능 -> 다음 프레임 추적에 그대로 반영
   Camera cam;
@@ -54,13 +57,14 @@ class VOTracker {
   std::unordered_map<int, int> first_p, first_l;
   std::unordered_map<int, Pose> rel;
   int failed_at = -1;  // tracking 실패 프레임 (-1 = 정상), 실패 후에는 추적 안 함 (relocalization 없음)
+  std::string fail_reason;
   int line_rejected = 0;
 
  private:
   bool track(int k);
   void update_map(int k);
-  bool fail(int k) {
-    failed_at = k;
+  bool fail(int k, const char* why) {
+    failed_at = k, fail_reason = why;
     return false;
   }
 };

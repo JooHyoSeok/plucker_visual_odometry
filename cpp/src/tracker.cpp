@@ -22,6 +22,20 @@ const Vec4* FrameObs::line(int j) const {
   return it == li_.end() ? nullptr : &seg[it->second];
 }
 
+namespace {
+Pose const_velocity(const Pose& a, const Pose& b) {  // a = k-2, b = k-1 -> k
+  const Mat3 dR = b.R * a.R.transpose();
+  const Vec3 dt = b.t - dR * a.t;
+  return Pose{orthonormalize(dR * b.R), dR * b.t + dt};
+}
+}  // namespace
+
+std::optional<Pose> VOTracker::predict() const {
+  const int k = obs.size();
+  if (failed_at >= 0 || k < 2 || !has_pose[k - 1] || !has_pose[k - 2]) return std::nullopt;
+  return const_velocity(poses[k - 2], poses[k - 1]);
+}
+
 std::vector<int> VOTracker::add(FrameObs o, const std::optional<Pose>& r, const std::optional<Pose>& init) {
   const int k = obs.size();
   o.index();
@@ -95,9 +109,7 @@ bool VOTracker::track(int k) {
   // constant-velocity prediction
   Pose p0;
   if (k >= 2) {
-    const Mat3 dR = poses[k - 1].R * poses[k - 2].R.transpose();
-    const Vec3 dt = poses[k - 1].t - dR * poses[k - 2].t;
-    p0 = Pose{orthonormalize(dR * poses[k - 1].R), dR * poses[k - 1].t + dt};
+    p0 = const_velocity(poses[k - 2], poses[k - 1]);
   } else {  // k=1: 초기화 포즈를 선형 보간한 값에서 시작
     p0 = Pose{poses[k - 1].R, poses[prm.init_frame].t / prm.init_frame};
   }
@@ -117,7 +129,7 @@ bool VOTracker::track(int k) {
       lid.push_back(o.lid[i]), m.L.push_back(it->second), m.seg.push_back(o.seg[i]);
     }
   }
-  if (2 * (pid.size() + lid.size()) < 12) return fail(k);  // 대응점 부족 -> tracking lost
+  if (2 * (pid.size() + lid.size()) < 12) return fail(k, "too few map correspondences");  // 대응점 부족 -> tracking lost
 
   const auto rit = rel.find(k);
   auto solve = [&](const MapObs& mm, const Pose& pi) {
@@ -150,14 +162,14 @@ bool VOTracker::track(int k) {
       map_l.erase(lid[i]), mature_l.erase(lid[i]), culled = true;
     }
   }
-  if (kept.X.size() + kept.L.size() < 6) return fail(k);  // 맵이 거의 다 안 맞음 -> 실패
+  if (kept.X.size() + kept.L.size() < 6) return fail(k, "almost all map correspondences are outliers");  // 맵이 거의 다 안 맞음 -> 실패
   if (culled) p1 = solve(kept, p1);
   r = residuals(cam, p1, kept);
   VecX a = r.cwiseAbs();
   const int n = a.size();
   std::sort(a.data(), a.data() + n);
   const double med = n % 2 ? a(n / 2) : 0.5 * (a(n / 2 - 1) + a(n / 2));
-  if (!r.allFinite() || med > 3.0 * prm.pix_noise) return fail(k);  // tracking failure -> 여기서 멈춤
+  if (!r.allFinite() || med > 3.0 * prm.pix_noise) return fail(k, "median reprojection error too large");  // tracking failure -> 여기서 멈춤
 
   poses[k] = Pose{orthonormalize(p1.R), p1.t};
   has_pose[k] = 1;

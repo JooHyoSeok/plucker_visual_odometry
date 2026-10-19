@@ -1,6 +1,6 @@
 // C++ monocular VO (points + Plücker lines): images in one by one -> pose out. No loop closure yet.
 // usage: run_vo [n_frames] --video PATH|CAM_INDEX [--gt PATH] [--calib fx,fy,cx,cy] [--no-lines] [--traj OUT.txt]
-//               [--init-frame N] [--no-viewer] [--snapshot OUT.png]
+//               [--init-frame N] [--no-reattach] [--no-viewer] [--snapshot OUT.png]
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -79,7 +79,7 @@ int main(int argc, char** argv) {
   if (!src) {
     std::fprintf(stderr,
                  "usage: %s [n_frames] --video PATH|CAM_INDEX [--gt PATH] [--calib fx,fy,cx,cy] [--no-lines] "
-                 "[--traj OUT.txt] [--init-frame N] [--no-viewer] [--snapshot OUT.png]\n",
+                 "[--traj OUT.txt] [--init-frame N] [--no-reattach] [--no-viewer] [--snapshot OUT.png]\n",
                  argv[0]);
     return 2;
   }
@@ -115,6 +115,8 @@ int main(int argc, char** argv) {
   }
 #endif
 
+  const bool no_reattach = flag(argc, argv, "--no-reattach");
+  long n_reattach = 0;
   double t_read = 0, t_front = 0, t_rel = 0, t_vo = 0, t_view = 0;
   const auto t_start = Clock::now();
   int k = 0;
@@ -127,6 +129,7 @@ int main(int argc, char** argv) {
     auto t0 = Clock::now();
     cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
     FrameObs o = front.step(gray);
+    if (const auto pred = vo.predict(); pred && !no_reattach) n_reattach += front.reattach(cam, vo, *pred, o);
     t_front += ms_since(t0);
     t0 = Clock::now();
     const std::optional<Pose> rel = k ? relative_pose(cam, vo.obs.back(), o) : std::nullopt;
@@ -153,8 +156,10 @@ int main(int argc, char** argv) {
   int n_ok = 0;
   while (n_ok < k && vo.has_pose[n_ok]) ++n_ok;
   std::printf("%d/%d frames tracked%s | %.1f fps (%.1f ms/frame)\n", n_ok, k,
-              vo.failed_at >= 0 ? (" | FAILED at " + std::to_string(vo.failed_at)).c_str() : "", k / (total / 1000),
+              vo.failed_at >= 0 ? (" | FAILED at " + std::to_string(vo.failed_at) + ": " + vo.fail_reason).c_str() : "",
+              k / (total / 1000),
               total / k);
+  std::printf("  map points re-attached after track loss: %ld (%.1f / frame)\n", n_reattach, double(n_reattach) / k);
   std::printf("  per frame: read %.1f | frontend %.1f (LSD %.1f) | 2D-2D %.1f | tracker %.1f | viewer %.1f ms\n",
               t_read / k, t_front / k, front.lsd_ms / k, t_rel / k, t_vo / k, t_view / k);
 

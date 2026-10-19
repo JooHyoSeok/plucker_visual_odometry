@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdio>
 #include <numeric>
+#include <unordered_set>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core/eigen.hpp>
 #include <opencv2/video/tracking.hpp>
@@ -222,6 +223,9 @@ FrameObs Frontend::step(const cv::Mat& g) {
   }
 
   prev_ = g.clone();
+  ++k_;
+  hist_.push_back(prev_);
+  if (int(hist_.size()) > prm.reattach_frames + 1) hist_.erase(hist_.begin());
   FrameObs o;
   o.pid = pid;
   for (const auto& p : pts) o.uv.emplace_back(p.x, p.y);
@@ -229,6 +233,76 @@ FrameObs Frontend::step(const cv::Mat& g) {
   o.seg = lines;
   o.index();
   return o;
+}
+
+int Frontend::reattach(const Camera& cam, const VOTracker& vo, const Pose& pred, FrameObs& o) {
+  const int k = k_;
+  if (int(vo.obs.size()) != k) return 0;  // o가 vo.obs 바로 다음 프레임이어야 함
+  // 1) 후보: 최근 프레임에서 본(가장 최근 관측 기준) 맵 점 중 지금 트랙이 없는 것 -> 예측 포즈로 투영
+  struct Cand { int id; cv::Point2f from, guess; };
+  std::unordered_map<int, std::vector<Cand>> by_frame;  // 마지막으로 본 프레임 -> 후보
+  std::unordered_set<int> seen;
+  for (int f = k - 1; f >= std::max(0, k - prm.reattach_frames); --f) {
+    const FrameObs& of = vo.obs[f];
+    for (size_t i = 0; i < of.pid.size(); ++i) {
+      const int j = of.pid[i];
+      if (!seen.insert(j).second || o.point(j)) continue;
+      const auto it = vo.map_p.find(j);
+      if (it == vo.map_p.end()) continue;
+      const Vec3 q = cam.K * (pred.R * it->second + pred.t);
+      if (q(2) < 0.5) continue;  // 카메라 앞 0.5 이상 (KITTI VO 단위)
+      const double u = q(0) / q(2), v = q(1) / q(2);
+      if (u < 10 || u >= cam.W - 10 || v < 10 || v >= cam.H - 10) continue;
+      by_frame[f].push_back({j, cv::Point2f(of.uv[i](0), of.uv[i](1)), cv::Point2f(u, v)});
+    }
+  }
+  // 현재 트랙 위치 격자 (중복/합치기 판단용, 4 px)
+  const float R = 4;
+  auto cell = [&](const cv::Point2f& p) { return int(p.y / R) * 100000 + int(p.x / R); };
+  std::unordered_multimap<int, int> grid;  // cell -> o 안의 인덱스
+  for (size_t i = 0; i < o.uv.size(); ++i) grid.emplace(cell(cv::Point2f(o.uv[i](0), o.uv[i](1))), i);
+  auto near = [&](const cv::Point2f& p) -> int {
+    for (int dy = -1; dy <= 1; ++dy)
+      for (int dx = -1; dx <= 1; ++dx) {
+        auto r = grid.equal_range(cell(p) + dy * 100000 + dx);
+        for (auto it = r.first; it != r.second; ++it)
+          if (std::hypot(o.uv[it->second](0) - p.x, o.uv[it->second](1) - p.y) < R) return it->second;
+      }
+    return -1;
+  };
+
+  // 2) 마지막으로 본 프레임 영상 -> 현재 영상 KLT
+  const cv::Mat& cur = hist_.back();
+  int added = 0;
+  for (auto& [f, cands] : by_frame) {
+    const int h = int(hist_.size()) - 1 - (k - f);
+    if (h < 0) continue;
+    std::vector<cv::Point2f> p0, p1;
+    for (const auto& c : cands) p0.push_back(c.from), p1.push_back(c.guess);
+    std::vector<uchar> s1, s2;
+    std::vector<float> err;
+    cv::calcOpticalFlowPyrLK(hist_[h], cur, p0, p1, s1, err, kWin, kMaxLevel, kCrit, cv::OPTFLOW_USE_INITIAL_FLOW, 1e-4);
+    std::vector<cv::Point2f> p0b = p0;
+    cv::calcOpticalFlowPyrLK(cur, hist_[h], p1, p0b, s2, err, kWin, kMaxLevel, kCrit, cv::OPTFLOW_USE_INITIAL_FLOW, 1e-4);
+    for (size_t i = 0; i < cands.size(); ++i) {
+      const cv::Point2f& p = p1[i];
+      if (!s1[i] || !s2[i] || cv::norm(p0[i] - p0b[i]) > 1.0 || cv::norm(p - cands[i].guess) > prm.reattach_px ||
+          p.x < 0 || p.x >= cur.cols || p.y < 0 || p.y >= cur.rows)
+        continue;
+      const int ni = near(p);
+      if (ni >= 0) {
+        if (vo.map_p.count(o.pid[ni])) continue;  // 이미 맵 점이 추적 중인 자리
+        o.pid[ni] = pid[ni] = cands[i].id;        // 맵에 없는 새 트랙 -> 원래 맵 점 id로 합침
+      } else {
+        o.pid.push_back(cands[i].id), o.uv.emplace_back(p.x, p.y);
+        pts.push_back(p), pid.push_back(cands[i].id);
+        grid.emplace(cell(p), o.uv.size() - 1);
+      }
+      ++added;
+    }
+  }
+  if (added) o.index();
+  return added;
 }
 
 Pose robust_init(const Camera& c, const FrameObs& o0, const FrameObs& oI) {
