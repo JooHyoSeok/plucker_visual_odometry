@@ -16,6 +16,7 @@ int main(int argc, char** argv) {
   const std::string dir = argv[1];
   TrackerParams prm;
   prm.use_lines = !(argc > 2 && std::strcmp(argv[2], "--no-lines") == 0);
+  prm.kf_mapping = false, prm.still_px = 0, prm.init_min_points = 0;  // Python vo_plucker.VOTracker와 같은 동작
   Camera cam;
   std::vector<ObsRecord> recs = read_obs(dir + "/obs.txt", cam);
 

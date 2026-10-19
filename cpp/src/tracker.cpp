@@ -1,7 +1,6 @@
 #include "vo_plucker/tracker.h"
 
 #include <algorithm>
-#include <stdexcept>
 
 namespace vp {
 
@@ -83,36 +82,58 @@ std::vector<int> VOTracker::add(FrameObs o, const std::optional<Pose>& r, const 
   poses.emplace_back();
   has_pose.push_back(0);
   if (r) rel[k] = *r;
-  const int I = prm.init_frame;
-  if (failed_at >= 0 || k < I) return {};
-  if (k > I) return track(k) ? std::vector<int>{k} : std::vector<int>{};
+  if (failed_at >= 0 || k == 0) return {};
+  if (init_frame_ >= 0) return track(k) ? std::vector<int>{k} : std::vector<int>{};
+  if (!init) return {};  // 초기화 전: 버퍼링
 
-  // frame 0 & init_frame: 초기화 후 1..init_frame-1을 몰아서 추적
-  if (!init) throw std::runtime_error("VOTracker: init pose required at init_frame");
+  // frame 0 & 초기화 프레임 I: 초기화 후 1..I-1을 몰아서 추적
+  const int I = init_frame_ = k;
   poses[0] = Pose{};
   poses[I] = Pose{init->R, init->t / init->t.norm()};
   has_pose[0] = has_pose[I] = 1;
+  kfs = {0, I};
   update_map(I);
+  bool ok = int(map_p.size()) >= prm.init_min_points;
   std::vector<int> done{0, I};
-  for (int f = 1; f < I; ++f) {
-    if (!track(f)) break;
+  for (int f = 1; f < I && ok; ++f) {
+    ok = track(f);
     done.push_back(f);
+  }
+  if (!ok) {  // 맵이 빈약하거나 중간 프레임 추적 실패 -> 이번 초기화는 버리고 다음 프레임에서 다시
+    reset_init();
+    return {};
   }
   return done;
 }
 
+void VOTracker::reset_init() {
+  map_p.clear(), map_l.clear(), mature_p.clear(), mature_l.clear(), kfs.clear();
+  std::fill(has_pose.begin(), has_pose.end(), 0);
+  init_frame_ = failed_at = -1, fail_reason.clear(), line_rejected = n_still = 0;
+}
+
 void VOTracker::update_map(int k) {
-  // 보이는 랜드마크를 지금까지의 모든 관측(포즈 아는 프레임)으로 다시 삼각측량 (structure-only 정제)
+  // 보이는 랜드마크를 지금까지의 관측(포즈 아는 프레임, kf_mapping이면 키프레임만)으로 다시 삼각측량 (structure-only 정제)
   const FrameObs& o = obs[k];
   std::vector<int> fr;
   std::vector<Pose> P;
-  for (int j : o.pid) {
-    const int f0 = first_p.at(j);
-    if (k - f0 < prm.tri_gap || mature_p.count(j)) continue;
+  // 랜드마크 j를 본 프레임들 (f0 = 처음 본 프레임). 삼각측량할 만큼 모이지 않았으면 false
+  auto frames_for = [&](int f0, auto&& seen) {
     fr.clear();
-    for (int f = f0; f <= k; ++f)
-      if (has_pose[f] && obs[f].point(j)) fr.push_back(f);
+    if (prm.kf_mapping) {
+      for (auto it = std::lower_bound(kfs.begin(), kfs.end(), f0); it != kfs.end() && *it <= k; ++it)
+        if (seen(*it)) fr.push_back(*it);
+      if (fr.size() < 2) return false;
+    } else {
+      if (k - f0 < prm.tri_gap) return false;
+      for (int f = f0; f <= k; ++f)
+        if (has_pose[f] && seen(f)) fr.push_back(f);
+    }
     fr = pick_frames(fr);
+    return true;
+  };
+  for (int j : o.pid) {
+    if (mature_p.count(j) || !frames_for(first_p.at(j), [&](int f) { return obs[f].point(j) != nullptr; })) continue;
     P.clear();
     std::vector<Vec2> uvs;
     for (int f : fr) P.push_back(poses[f]), uvs.push_back(*obs[f].point(j));
@@ -124,12 +145,7 @@ void VOTracker::update_map(int k) {
   }
   if (!prm.use_lines) return;
   for (int j : o.lid) {
-    const int f0 = first_l.at(j);
-    if (k - f0 < prm.tri_gap || mature_l.count(j)) continue;
-    fr.clear();
-    for (int f = f0; f <= k; ++f)
-      if (has_pose[f] && obs[f].line(j)) fr.push_back(f);
-    fr = pick_frames(fr);
+    if (mature_l.count(j) || !frames_for(first_l.at(j), [&](int f) { return obs[f].line(j) != nullptr; })) continue;
     P.clear();
     std::vector<Vec4> sgs;
     for (int f : fr) P.push_back(poses[f]), sgs.push_back(*obs[f].line(j));
@@ -143,13 +159,30 @@ void VOTracker::update_map(int k) {
   }
 }
 
+bool VOTracker::is_keyframe(int k, int n_map_used) const {
+  // 직전 키프레임 대비 회전 보정 parallax (같은 트랙의 픽셀 이동에서 회전만으로 설명되는 부분을 뺀 것) 중앙값
+  const int last = kfs.back();
+  const Mat3 H = cam.K * poses[k].R * poses[last].R.transpose() * cam.Kinv;
+  std::vector<double> d;
+  for (size_t i = 0; i < obs[k].pid.size(); ++i)
+    if (const Vec2* u = obs[last].point(obs[k].pid[i])) {
+      const Vec3 q = H * Vec3((*u)(0), (*u)(1), 1.0);
+      d.push_back((q.head<2>() / q(2) - obs[k].uv[i]).norm());
+    }
+  if (d.size() < 10) return true;  // 직전 키프레임과 공통 트랙이 거의 없음 -> 새 키프레임 필요
+  std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
+  const double med = d[d.size() / 2];
+  if (med >= prm.kf_parallax_px) return true;
+  return med >= 2.0 && (n_map_used < prm.kf_min_map || k - last >= prm.kf_max_gap);
+}
+
 bool VOTracker::track(int k) {
   // constant-velocity prediction
   Pose p0;
   if (k >= 2) {
     p0 = const_velocity(poses[k - 2], poses[k - 1]);
   } else {  // k=1: 초기화 포즈를 선형 보간한 값에서 시작
-    p0 = Pose{poses[k - 1].R, poses[prm.init_frame].t / prm.init_frame};
+    p0 = Pose{poses[k - 1].R, poses[init_frame_].t / init_frame_};
   }
 
   const FrameObs& o = obs[k];
@@ -168,6 +201,20 @@ bool VOTracker::track(int k) {
     }
   }
   if (2 * (pid.size() + lid.size()) < 12) return fail(k, "too few map correspondences");  // 대응점 부족 -> tracking lost
+
+  // 정지 판정: 맵 점 트랙이 직전 프레임에서 거의 안 움직였으면 포즈 유지 (2D-2D 방향은 노이즈, 삼각측량도 baseline 0)
+  if (prm.still_px > 0 && k > init_frame_) {
+    std::vector<double> flow;
+    for (size_t i = 0; i < pid.size(); ++i)
+      if (const Vec2* u = obs[k - 1].point(pid[i])) flow.push_back((*u - m.uv[i]).norm());
+    if (flow.size() >= 20) {
+      std::nth_element(flow.begin(), flow.begin() + flow.size() / 2, flow.end());
+      if (flow[flow.size() / 2] < prm.still_px) {
+        poses[k] = poses[k - 1], has_pose[k] = 1, ++n_still;
+        return true;
+      }
+    }
+  }
 
   const auto rit = rel.find(k);
   auto solve = [&](const MapObs& mm, const Pose& pi) {
@@ -211,7 +258,12 @@ bool VOTracker::track(int k) {
 
   poses[k] = Pose{orthonormalize(p1.R), p1.t};
   has_pose[k] = 1;
-  update_map(k);
+  if (!prm.kf_mapping) {
+    update_map(k);
+  } else if (k > init_frame_ && is_keyframe(k, kept.X.size())) {
+    kfs.push_back(k);
+    update_map(k);
+  }
   return true;
 }
 

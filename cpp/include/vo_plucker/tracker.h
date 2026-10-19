@@ -1,6 +1,9 @@
 // Frame-by-frame monocular VO, points + Plücker lines (port of vo_plucker.VOTracker, "decoupled" mode).
 //   rotation + translation direction from 2D-2D (given per frame as rel), translation magnitude from the map
 //   mapping: N-view triangulation of points / lines until parallax > mature_deg, then frozen
+//            kf_mapping: only at keyframes, from keyframe observations (else every frame, all observations)
+//   init   : whenever an init pose (frame 0 -> current) is passed to add() (the caller decides when: parallax)
+//   still  : median flow of map-point tracks < still_px -> stationary, pose kept, no mapping
 #pragma once
 #include <string>
 #include <unordered_map>
@@ -25,25 +28,31 @@ struct FrameObs {
 };
 
 struct TrackerParams {
-  int init_frame = 3;        // frame 0 과 이 프레임으로 초기화
-  int tri_gap = 2;           // 새 랜드마크 삼각측량 최소 프레임 간격
+  int tri_gap = 2;           // (kf_mapping=false) 새 랜드마크 삼각측량 최소 프레임 간격
   double pix_noise = 1.0;    // px, tracking failure 판정 기준
   double point_min_deg = 2.0;
   double line_min_deg = 2.0;  // 두 역투영 평면 사이 최소 각도
   double mature_deg = 5.0;    // parallax가 이 이상이면 랜드마크 고정
   double outlier_px = 6.0;    // 포즈 추정 후 이보다 큰 재투영 오차 랜드마크는 맵에서 제거
   bool use_lines = true;
+  double still_px = 0.5;      // 맵 점 트랙 flow 중앙값이 이보다 작으면 정지 (0 = 끔)
+  int init_min_points = 100;  // 초기화 직후 삼각측량된 맵 점이 이보다 적거나 1..I-1 추적이 실패하면 초기화 취소 (다음 프레임에 재시도)
+  bool kf_mapping = false;    // true: 키프레임에서만 매핑 (KITTI 06에서 오히려 나빠짐), false: 매 프레임 (Python과 동일)
+  double kf_parallax_px = 10; // 직전 키프레임 대비 회전 보정 parallax 중앙값이 이 이상이면 키프레임
+  int kf_min_map = 150;       // 추적에 쓴 맵 대응이 이보다 적으면 (parallax 2 px 이상일 때) 키프레임
+  int kf_max_gap = 8;         // 키프레임 최대 간격 [frames] (parallax 2 px 이상일 때)
 };
 
 class VOTracker {
  public:
   VOTracker(const Camera& cam, const TrackerParams& prm) : cam(cam), prm(prm) {}
 
-  // rel = (R_rel, t방향) k-1 -> k, init = (R, t) frame 0 -> init_frame (k == init_frame일 때 필수)
+  // rel = (R_rel, t방향) k-1 -> k, init = (R, t) frame 0 -> k: 처음 주어진 프레임에서 초기화 (그 전 프레임은 버퍼링)
   // 반환: 이번 호출에서 포즈가 정해진 프레임 번호
   std::vector<int> add(FrameObs o, const std::optional<Pose>& rel, const std::optional<Pose>& init);
   // 다음 프레임(obs.size())의 constant-velocity 예측 포즈. 직전 두 프레임 포즈가 없으면 nullopt
   std::optional<Pose> predict() const;
+  bool initialized() const { return init_frame_ >= 0; }
   // 마지막 프레임 k: k-1 -> k 추정 운동에 안 맞는 (맵에 없는) 점 트랙 id = 움직이는 물체 / 잘못된 트랙.
   // 이동이 거의 없으면 (|ΔC| / 맵 점 중앙 깊이 < 0.002) 회전만으로 예측한 위치, 아니면 Sampson 오차로 판정 [px]
   std::vector<int> inconsistent_tracks(double px) const;
@@ -59,6 +68,8 @@ class VOTracker {
   std::unordered_set<int> mature_p, mature_l;
   std::unordered_map<int, int> first_p, first_l;
   std::unordered_map<int, Pose> rel;
+  std::vector<int> kfs;  // 키프레임 번호 (오름차순)
+  int n_still = 0;       // 정지로 판정한 프레임 수
   int failed_at = -1;  // tracking 실패 프레임 (-1 = 정상), 실패 후에는 추적 안 함 (relocalization 없음)
   std::string fail_reason;
   int line_rejected = 0;
@@ -66,6 +77,9 @@ class VOTracker {
  private:
   bool track(int k);
   void update_map(int k);
+  bool is_keyframe(int k, int n_map_used) const;
+  void reset_init();  // 초기화 취소: 맵/포즈를 비우고 초기화 전 상태로
+  int init_frame_ = -1;
   bool fail(int k, const char* why) {
     failed_at = k, fail_reason = why;
     return false;

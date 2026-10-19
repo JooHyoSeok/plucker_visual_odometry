@@ -20,7 +20,7 @@ int main(int argc, char** argv) {
   const std::vector<ObsRecord> ref = read_obs(std::string(argv[1]) + "/obs.txt", cam);
   cv::VideoCapture cap(argv[2]);
   Frontend front;
-  const int init_frame = TrackerParams().init_frame;
+  const int init_frame = 3;  // Python INIT_FRAME
   std::vector<FrameObs> obs;
   int first_bad = -1, exact = 0, n_rel_bad = 0, worst_rel = -1;
   double max_dp = 0, max_dl = 0, max_drel = 0, sum_jac = 0;

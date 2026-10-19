@@ -1,6 +1,7 @@
 // C++ monocular VO (points + Plücker lines): images in one by one -> pose out. No loop closure yet.
 // usage: run_vo [n_frames] --video PATH|CAM_INDEX [--gt PATH] [--calib fx,fy,cx,cy] [--no-lines] [--traj OUT.txt]
-//               [--init-frame N] [--no-reattach] [--rel-static] [--drop-dynamic] [--no-viewer] [--snapshot OUT.png]
+//               [--init-frame N | --init-px P] [--kf-mapping] [--no-reattach]
+//               [--rel-static] [--drop-dynamic] [--no-viewer] [--snapshot OUT.png]
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -36,6 +37,16 @@ static bool flag(int argc, char** argv, const char* name) {
 
 static double ms_since(Clock::time_point t0) {
   return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+}
+
+// 두 프레임 공통 점 트랙의 픽셀 이동 중앙값 (공통 트랙이 min_common 미만이면 0)
+static double median_shift(const FrameObs& a, const FrameObs& b, size_t min_common) {
+  std::vector<double> d;
+  for (size_t i = 0; i < b.pid.size(); ++i)
+    if (const Vec2* u = a.point(b.pid[i])) d.push_back((*u - b.uv[i]).norm());
+  if (d.size() < min_common) return 0;
+  std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
+  return d[d.size() / 2];
 }
 
 // KITTI pose file: one 3x4 T_wc per line
@@ -79,7 +90,7 @@ int main(int argc, char** argv) {
   if (!src) {
     std::fprintf(stderr,
                  "usage: %s [n_frames] --video PATH|CAM_INDEX [--gt PATH] [--calib fx,fy,cx,cy] [--no-lines] "
-                 "[--traj OUT.txt] [--init-frame N] [--no-reattach] [--rel-static] [--drop-dynamic] [--no-viewer] [--snapshot OUT.png]\n",
+                 "[--traj OUT.txt] [--init-frame N | --init-px P] [--kf-mapping] [--no-reattach] [--rel-static] [--drop-dynamic] [--no-viewer] [--snapshot OUT.png]\n",
                  argv[0]);
     return 2;
   }
@@ -88,7 +99,10 @@ int main(int argc, char** argv) {
   std::sscanf(arg(argc, argv, "--calib", "707.0912,707.0912,601.8873,183.1104"), "%lf,%lf,%lf,%lf", &fx, &fy, &cx, &cy);
   TrackerParams prm;
   prm.use_lines = !flag(argc, argv, "--no-lines");
-  prm.init_frame = std::atoi(arg(argc, argv, "--init-frame", "3"));  // 시작 때 거의 정지해 있으면 키워야 함 (07: 8)
+  prm.kf_mapping = flag(argc, argv, "--kf-mapping");
+  // 초기화: --init-frame N이면 그 프레임, 아니면 frame 0 대비 픽셀 이동 중앙값이 --init-px 이상이 될 때 (07처럼 천천히 출발해도)
+  const int init_fixed = std::atoi(arg(argc, argv, "--init-frame", "0"));
+  const double init_px = std::atof(arg(argc, argv, "--init-px", "20"));  // 이 이상이면 초기화 시도, 품질이 안 되면 다음 프레임 재시도
   const char* gt_path = arg(argc, argv, "--gt", nullptr);
   const auto gt = gt_path ? load_kitti(gt_path) : std::vector<Eigen::Matrix<double, 3, 4>>{};
 
@@ -136,10 +150,15 @@ int main(int argc, char** argv) {
     t0 = Clock::now();
     const std::optional<Pose> rel = k ? relative_pose(cam, vo.obs.back(), o, rel_all ? nullptr : &vo.map_p) : std::nullopt;
     std::optional<Pose> init;
-    if (k == prm.init_frame) init = robust_init(cam, vo.obs[0], o);
+    if (!vo.initialized() && k > 0 &&
+        (init_fixed > 0 ? k == init_fixed : median_shift(vo.obs[0], o, 50) >= init_px)) {
+      init = robust_init(cam, vo.obs[0], o);
+    }
     t_rel += ms_since(t0);
     t0 = Clock::now();
+    const bool was_init = vo.initialized();
     vo.add(std::move(o), rel, init);
+    if (init && !was_init) std::printf("  init at frame %d: %s\n", k, vo.initialized() ? "ok" : "rejected, retry next frame");
     if (!keep_dynamic) {
       const std::vector<int> dyn = vo.inconsistent_tracks(3.0);
       front.drop(dyn), n_dynamic += dyn.size();
@@ -165,6 +184,8 @@ int main(int argc, char** argv) {
               vo.failed_at >= 0 ? (" | FAILED at " + std::to_string(vo.failed_at) + ": " + vo.fail_reason).c_str() : "",
               k / (total / 1000),
               total / k);
+  std::printf("  keyframes %zu | stationary frames %d | mapping %s\n", vo.kfs.size(), vo.n_still,
+              prm.kf_mapping ? "keyframes" : "every frame");
   std::printf("  map points re-attached after track loss: %ld (%.1f / frame) | dynamic tracks dropped: %ld (%.1f / frame)\n",
               n_reattach, double(n_reattach) / k, n_dynamic, double(n_dynamic) / k);
   std::printf("  per frame: read %.1f | frontend %.1f (LSD %.1f) | 2D-2D %.1f | tracker %.1f | viewer %.1f ms\n",
