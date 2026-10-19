@@ -1,7 +1,7 @@
 // C++ monocular VO (points + Plücker lines): images in one by one -> pose out. Optional loop closure + Sim(3) PGO (--loop, pluggable modules).
 // usage: run_vo [n_frames] --video PATH|CAM_INDEX [--gt PATH] [--calib fx,fy,cx,cy] [--no-lines] [--traj OUT.txt]
 //               [--init-frame N | --init-px P] [--kf-mapping] [--no-reattach]
-//               [--rel-static] [--drop-dynamic] [--rel-min-px P] [--resize S] [--stride N] [--start N] [--min-parallax DEG] [--mature-deg DEG] [--init-min-points N] [--sim3-align] [--pose-g2o] [--hybrid] [--hybrid-w W] [--local-ba] [--ba-window N] [--ba-fixed N] [--ba-lines] [--ba-mature-only] [--ba-depth-prior SIGMA] [--ba-sync] [--kf-parallax PX] [--loop] [--loop-pr thumb|netvlad|salad|mast3r] [--loop-ver orb|mast3r|orb+mast3r] [--loop-python PY] [--loop-min-sim S] [--loop-shortlist N] [--loop-min-gap N] [--loop-no-feedback] [--loop-sync] [--loop-skip-chi2 X] [--loop-consist N] [--loop-min-f N] [--loop-da3-3d] [--loop-prune R] [--loop-fuse] [--loop-fuse-nb N] [--loop-covis-min N] [--depth-prior da3] [--da3-init] [--depth-prior-every N] [--depth-prior-sigma S] [--depth-prior-min-dev D] [--autostart] [--traj-online OUT.txt] [--dump-map OUT.txt] [--no-viewer] [--snapshot OUT.png]
+//               [--rel-static] [--drop-dynamic] [--rel-min-px P] [--resize S] [--stride N] [--start N] [--min-parallax DEG] [--mature-deg DEG] [--init-min-points N] [--sim3-align] [--pose-g2o] [--hybrid] [--hybrid-w W] [--local-ba] [--ba-window N] [--ba-fixed N] [--ba-lines] [--ba-mature-only] [--ba-depth-prior SIGMA] [--da3-points] [--da3-lines] [--ba-sync] [--kf-parallax PX] [--fld] [--loop] [--loop-pr thumb|netvlad|salad|mast3r] [--loop-ver orb|mast3r|orb+mast3r] [--loop-python PY] [--loop-min-sim S] [--loop-shortlist N] [--loop-min-gap N] [--loop-no-feedback] [--loop-sync] [--loop-skip-chi2 X] [--loop-consist N] [--loop-min-f N] [--loop-da3-3d] [--loop-prune R] [--loop-fuse] [--loop-fuse-nb N] [--loop-covis-min N] [--depth-prior da3] [--da3-init] [--da3-range MIN,MAX] [--depth-prior-every N] [--depth-prior-sigma S] [--depth-prior-min-dev D] [--realtime HZ] [--final-gba] [--autostart] [--traj-online OUT.txt] [--dump-map OUT.txt] [--no-viewer] [--snapshot OUT.png]
 //   --resize S : 영상과 intrinsic을 S배 (고해상도 입력용, 예: iPhone 1920x1440 -> 0.5)
 //   --stride N : N 프레임마다 하나만 사용 (고 fps / 느린 이동용). GT도 같은 간격으로 맞춤
 //   --start N  : 처음 N 프레임 건너뛰기 (예: 시작이 제자리 회전뿐인 핸드헬드 영상). GT도 N부터
@@ -168,6 +168,8 @@ int main(int argc, char** argv) {
   prm.ba_fixed = std::atoi(arg(argc, argv, "--ba-fixed", "10"));
   prm.ba_lines = flag(argc, argv, "--ba-lines");  // local BA 에 라인도 (orthonormal 4-DoF 정점 + 끝점 거리 엣지)
   prm.ba_mature_only = flag(argc, argv, "--ba-mature-only");  // local BA 에 성숙한 (시차 충분) 점만
+  prm.da3_lines = flag(argc, argv, "--da3-lines");  // 키프레임 선분을 DA3 깊이로 바로 Plücker 라인 (진행 방향 라인 포함)
+  prm.da3_points = flag(argc, argv, "--da3-points");  // 키프레임 새 트랙을 DA3 깊이로 맵에 (pseudo RGB-D, --depth-prior da3 필요)
   prm.ba_depth_sigma = std::atof(arg(argc, argv, "--ba-depth-prior", "0"));  // local BA 에 DA3 점 깊이 prior (log 깊이 σ)
   prm.kf_parallax_px = std::atof(arg(argc, argv, "--kf-parallax", "10"));  // 키프레임: 회전 보정 parallax 중앙값 [px]
   // 루프 클로저: --loop (내장: 썸네일 후보 + ORB/Sim(3) 검증) -> 키프레임마다 검사, 찾으면 Sim(3) PGO + 맵 보정
@@ -251,7 +253,9 @@ int main(int argc, char** argv) {
   lprm.shortlist = std::atoi(arg(argc, argv, "--loop-shortlist", loop_ver == "orb" ? "15" : "3"));  // MASt3R는 쌍당 비쌈
   // 후보 유사도 하한: netvlad/salad 코사인 0.5, mast3r ASMK 점수 0.02 (06: 참 루프 0.06-0.11, 그 외 <= 0.018)
   const double loop_min_sim = std::atof(arg(argc, argv, "--loop-min-sim", loop_pr == "mast3r" ? "0.02" : "0.5"));
-  Frontend front;
+  FrontendParams fprm;
+  fprm.fld = flag(argc, argv, "--fld");  // 선 검출: LSD 대신 FastLineDetector (프레임당 LSD ~17 ms 가 트래킹 스레드 병목)
+  Frontend front(fprm);
   VOTracker vo(cam, prm);
   std::unique_ptr<LoopCloser> loop;
   std::shared_ptr<LoopServer> srv;  // Python 플러그인 서버 (루프 모듈 / DA3)
@@ -260,7 +264,7 @@ int main(int argc, char** argv) {
     if (py_pr || py_ver || use_anchor || da3_init)
       srv = start_loop_server(std::string(arg(argc, argv, "--loop-python", "python3")) + " " VP_LOOP_SERVER " --pr " +
                               (py_pr ? loop_pr : "none") + " --ver " + (py_ver ? "mast3r" : "none") +
-                              (use_anchor || da3_init ? " --depth da3" : ""));
+                              (use_anchor || da3_init ? std::string(" --depth da3 --depth-range ") + arg(argc, argv, "--da3-range", "3,40") : ""));
   }
   if (use_loop || use_anchor) {
     const bool py_pr = use_loop && loop_pr != "thumb";
@@ -305,9 +309,13 @@ int main(int argc, char** argv) {
              keep_dynamic = !flag(argc, argv, "--drop-dynamic");
   long n_reattach = 0, n_dynamic = 0, n_depth_obs = 0;
   double t_read = 0, t_front = 0, t_rel = 0, t_vo = 0, t_view = 0, t_wait = 0, t_wait_max = 0;
+  // --realtime HZ: 프레임을 카메라 속도로 넣음 (KITTI 10, EuRoC 20) -> 스레드 모드를 실제 센서 속도에서 평가
+  const double realtime_hz = std::atof(arg(argc, argv, "--realtime", "0"));
   const auto t_start = Clock::now();
   int k = 0;
   for (; k < n_max; ++k) {
+    if (realtime_hz > 0)
+      std::this_thread::sleep_until(t_start + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(k / realtime_hz)));
     if (k) {
       const auto t0 = Clock::now();
       if (!read()) break;
@@ -446,9 +454,13 @@ int main(int argc, char** argv) {
               n_reattach, double(n_reattach) / k, n_dynamic, double(n_dynamic) / k);
   if (loop) {
     std::printf("  loop closure (%s): %zu loops | %d queries, detect %.1f ms/query, PGO + correction %.0f ms total | "
-                "%d keyframes dropped (loop thread behind)\n",
+                "%d keyframes dropped, %d without DA3 (loop thread behind)\n",
                 lprm.threaded ? "thread" : "sync", loop->loops.size(), loop->n_queries,
-                loop->ms_detect / std::max(loop->n_queries, 1), loop->ms_pgo, loop->n_skipped);
+                loop->ms_detect / std::max(loop->n_queries, 1), loop->ms_pgo, loop->n_skipped, loop->n_depth_skipped);
+    if (prm.da3_points) std::printf("  DA3 map points (pseudo RGB-D): %ld\n", loop->n_da3_points);
+    if (prm.da3_lines) std::printf("  DA3 map lines (single-view Plücker from DA3 depth): %ld\n", loop->n_da3_lines);
+    if (loop->n_rejected_pgo) std::printf("  loops rejected after PGO (edge still inconsistent): %d\n", loop->n_rejected_pgo);
+    if (loop->n_bad_scale) std::printf("  loop candidates rejected for Sim(3) scale ratio outside 1/3..3: %d\n", loop->n_bad_scale);
     if (use_anchor)
       std::printf("  depth prior: %d keyframes anchored, %d anchor PGO runs, %d skipped (scale already consistent)\n",
                   loop->n_anchors, loop->n_anchor_pgo, loop->n_anchor_skip);
@@ -495,16 +507,32 @@ int main(int argc, char** argv) {
 
   // ---- trajectory (KITTI format, T_wc) ----
   const char* traj = arg(argc, argv, "--traj", "cpp_traj.txt");
-  std::ofstream ft(traj);
-  ft.precision(9);
-  std::vector<Vec3> C;
-  for (int f = f0; f < f0 + n_ok; ++f) {
-    const Mat3 Rwc = vo.poses[f].R.transpose();
-    const Vec3 twc = center(vo.poses[f]);
-    for (int r = 0; r < 3; ++r) ft << Rwc(r, 0) << ' ' << Rwc(r, 1) << ' ' << Rwc(r, 2) << ' ' << twc(r) << (r < 2 ? ' ' : '\n');
-    C.push_back(twc);
+  auto save_traj = [&](const std::string& path) {
+    std::ofstream ft(path);
+    ft.precision(9);
+    std::vector<Vec3> C;
+    for (int f = f0; f < f0 + n_ok; ++f) {
+      const Mat3 Rwc = vo.poses[f].R.transpose();
+      const Vec3 twc = center(vo.poses[f]);
+      for (int r = 0; r < 3; ++r) ft << Rwc(r, 0) << ' ' << Rwc(r, 1) << ' ' << Rwc(r, 2) << ' ' << twc(r) << (r < 2 ? ' ' : '\n');
+      C.push_back(twc);
+    }
+    std::printf("saved %s\n", path.c_str());
+    return C;
+  };
+  // --final-gba: 시퀀스 끝에 전역 BA 한 번 (ORB-SLAM "+ Global BA" 비교용). 같은 실행의 BA 전 궤적은 *_pregba.txt
+  if (flag(argc, argv, "--final-gba") && loop) {
+    std::string pre(traj);
+    pre = (pre.size() > 4 && pre.substr(pre.size() - 4) == ".txt" ? pre.substr(0, pre.size() - 4) : pre) + "_pregba.txt";
+    save_traj(pre);
+    std::vector<LoopPose> lp;
+    for (const LoopEdge& e : loop->loop_edges()) lp.push_back({e.i, e.j, Pose{e.S.R, e.S.t}});
+    const LocalBAStats s = global_ba(vo, lp, prm.ba_lines && prm.use_lines);
+    std::printf("  global BA: %d keyframes (%d fixed), %d points, %zu loop edges, %.0f ms, RMS %.2f -> %.2f px, "
+                "%d outlier points removed, %d DA3 priors\n", s.kfs, s.fixed, s.points, lp.size(), s.ms, s.rms_before,
+                s.rms_after, s.outliers, s.depth_priors);
   }
-  std::printf("saved %s\n", traj);
+  const std::vector<Vec3> C = save_traj(traj);
   print_ate(C, std::vector<Eigen::Matrix<double, 3, 4>>(gt.begin() + std::min<size_t>(f0, gt.size()), gt.end()));
 #ifdef VP_WITH_VIEWER
   if (viewer && loop) viewer->update(frame, vo);  // 마지막 보정 반영

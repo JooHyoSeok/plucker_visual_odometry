@@ -11,6 +11,7 @@
 #include <g2o/solvers/eigen/linear_solver_eigen.h>
 #include <g2o/types/sba/edge_project_xyz.h>
 #include <g2o/types/sba/edge_project_xyz_onlypose.h>
+#include <g2o/types/sba/edge_se3_expmap.h>
 #include <g2o/types/sba/vertex_se3_expmap.h>
 #include <g2o/types/slam3d/vertex_pointxyz.h>
 
@@ -437,6 +438,25 @@ LocalBAStats local_ba_apply(VOTracker& vo, LocalBAProblem& P) {
   }
   st.ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   return st;
+}
+
+LocalBAStats global_ba(VOTracker& vo, const std::vector<LoopPose>& loops, bool lines) {
+  LocalBAPtr P = local_ba_build(vo, vo.kfs.size(), 0, lines, false);
+  if (!P) return LocalBAStats{};
+  Eigen::Matrix<double, 6, 6> I = Eigen::Matrix<double, 6, 6>::Zero();  // [회전, 이동], PGO 루프 엣지와 같은 잡음
+  for (int k = 0; k < 3; ++k) I(k, k) = 1 / (0.01 * 0.01), I(3 + k, 3 + k) = 1 / (0.05 * 0.05);
+  for (const LoopPose& l : loops) {
+    const auto a = P->vk.find(l.j), b = P->vk.find(l.i);
+    if (a == P->vk.end() || b == P->vk.end()) continue;
+    auto* e = new g2o::EdgeSE3Expmap();  // error = log(T_i^-1 M T_j), M = T_i T_j^-1
+    e->setVertex(0, a->second);
+    e->setVertex(1, b->second);
+    e->setMeasurement(g2o::SE3Quat(l.T.R, l.T.t));
+    e->setInformation(I);
+    P->opt.addEdge(e);
+  }
+  local_ba_solve(*P);
+  return local_ba_apply(vo, *P);
 }
 
 LocalBAStats local_ba(VOTracker& vo, int window, int max_fixed, bool lines, bool mature_only) {

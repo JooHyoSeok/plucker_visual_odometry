@@ -97,12 +97,15 @@ Pose cv_pose(const cv::Mat& R, const cv::Mat& t) {
 }
 }  // namespace
 
-Frontend::Frontend(const FrontendParams& prm) : prm(prm), lsd_(cv::createLineSegmentDetector(cv::LSD_REFINE_STD)) {}
+Frontend::Frontend(const FrontendParams& prm) : prm(prm), lsd_(cv::createLineSegmentDetector(cv::LSD_REFINE_STD)) {
+  if (prm.fld) fld_ = cv::ximgproc::createFastLineDetector();
+}
 
 FrameObs Frontend::step(const cv::Mat& g) {
   const auto t0 = std::chrono::steady_clock::now();
   std::vector<cv::Vec4f> raw;
-  lsd_->detect(g, raw);
+  if (fld_) fld_->detect(g, raw);
+  else lsd_->detect(g, raw);
   lsd_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   std::vector<Vec4> det;
   std::vector<Vec2> det_dir, det_mid;

@@ -5,6 +5,7 @@
 #pragma once
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/ximgproc/fast_line_detector.hpp>
 
 #include "vo_plucker/tracker.h"
 
@@ -18,6 +19,7 @@ struct FrontendParams {
   // 끊긴 맵 점 재연결 (reattach): 최근 이만큼의 프레임에서 본 맵 점까지, 투영 위치에서 이 px 안에서만 받아들임
   int reattach_frames = 30;
   double reattach_px = 20;
+  bool fld = false;  // 선 검출을 LSD 대신 ximgproc FastLineDetector 로 (빠름)
 };
 
 class Frontend {
@@ -40,6 +42,7 @@ class Frontend {
 
  private:
   cv::Ptr<cv::LineSegmentDetector> lsd_;
+  cv::Ptr<cv::ximgproc::FastLineDetector> fld_;
   cv::Mat prev_;
   std::vector<std::vector<cv::Mat>> hist_;  // 최근 reattach_frames+1 장의 KLT 피라미드 (back() = 현재 프레임)
   int k_ = -1;                 // 현재 프레임 번호

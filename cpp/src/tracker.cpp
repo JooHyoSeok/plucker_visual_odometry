@@ -134,7 +134,7 @@ void VOTracker::add_depth_points(int k) {
 }
 
 void VOTracker::reset_init() {
-  map_p.clear(), map_l.clear(), mature_p.clear(), mature_l.clear(), kfs.clear();
+  map_p.clear(), map_l.clear(), mature_p.clear(), mature_l.clear(), kfs.clear(), da3_p.clear(), da3_l.clear();
   std::fill(has_pose.begin(), has_pose.end(), 0);
   init_frame_ = failed_at = -1, fail_reason.clear(), line_rejected = n_still = n_map6dof = 0;
 }
@@ -166,8 +166,10 @@ void VOTracker::update_map(int k) {
     for (int f : fr) P.push_back(poses[f]), uvs.push_back(*obs[f].point(j));
     const auto X = tri_point_multi(cam, P, uvs);
     if (point_ok(cam, X, P, uvs, prm.point_min_deg)) {
+      const bool mature = parallax_deg(*X, P.front(), P.back()) > prm.mature_deg;
+      if (!mature && da3_p.count(j)) continue;  // 작은 시차 삼각측량보다 DA3 깊이가 나음
       map_p[j] = *X;
-      if (parallax_deg(*X, P.front(), P.back()) > prm.mature_deg) mature_p.insert(j);
+      if (mature) mature_p.insert(j), da3_p.erase(j);
     }
   }
   if (!prm.use_lines) return;
@@ -178,8 +180,10 @@ void VOTracker::update_map(int k) {
     for (int f : fr) P.push_back(poses[f]), sgs.push_back(*obs[f].line(j));
     const auto L = tri_line_multi(cam, P, sgs);
     if (line_ok(cam, L, P, sgs, prm.line_min_deg)) {
+      const bool mature = plane_angle_deg(cam, P.front(), sgs.front(), P.back(), sgs.back()) > prm.mature_deg;
+      if (!mature && da3_l.count(j)) continue;  // 작은 평면 각 삼각측량보다 DA3 라인이 나음
       map_l[j] = *L;
-      if (plane_angle_deg(cam, P.front(), sgs.front(), P.back(), sgs.back()) > prm.mature_deg) mature_l.insert(j);
+      if (mature) mature_l.insert(j), da3_l.erase(j);
     } else if (!map_l.count(j)) {
       ++line_rejected;
     }

@@ -62,6 +62,11 @@ cpp/build/run_vo --video dataset/sequences/00/image_2/%06d.png --gt dataset/pose
   3D is missing / poor; used only for the first link of a new revisit). Best configuration:
   `--depth-prior da3 --loop --kf-parallax 25 --local-ba --ba-depth-prior 0.3 --loop-da3-3d --loop-min-f 40 --loop-python <py>`.
   At most 2 DA3 servers on one 32 GB GPU.
+- More options (PROGRESS.md section 11): `--final-gba` (global BA at the end: all keyframes + points + DA3 prior + loop
+  pose edges, writes `*_pregba.txt` too), `--da3-lines` (Plücker lines from one view: inverse depth is affine along the image
+  segment -> robust fit to DA3 depth, also lines parallel to the motion that cannot be triangulated), `--da3-points` (DA3
+  depth for keyframe tracks without enough parallax), `--da3-range MIN,MAX` (DA3 depth used, indoor 0.5,20),
+  `--realtime HZ` (feed frames at camera rate), `--fld` (FastLineDetector instead of LSD).
 - Options (off by default, mixed results per sequence, see PROGRESS.md section 9): `--hybrid --hybrid-fix-rot` (translation
   refined by map + epipolar), `--loop-consist N --loop-prune R` (loop consistency / outlier edges), `--loop-fuse` (map point
   fusion + covisibility candidate exclusion), `--local-ba [--ba-lines]` (keyframe BA in a LocalMapping thread, Plücker lines in

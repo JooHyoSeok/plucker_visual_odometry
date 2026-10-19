@@ -84,6 +84,8 @@ struct TrackerParams {
   bool ba_lines = false;      // local BA 에 라인도 (orthonormal 4-DoF, 해석 Jacobian)
   bool depth_init = false;    // 깊이가 붙은 첫 프레임 하나로 초기화 (점은 고정 안 함, 시차가 생기면 삼각측량으로 교체), 그 뒤 단안
   bool ba_mature_only = false; // local BA 에 성숙한 점만
+  bool da3_lines = false;     // 키프레임 선분을 DA3 깊이로 바로 Plücker 라인 (진행 방향 퇴화 라인 포함), 평면 각 mature_deg 넘으면 삼각측량으로
+  bool da3_points = false;    // 키프레임에서 시차가 작은 트랙을 DA3 깊이로 맵 점 (pseudo RGB-D), 시차 mature_deg 넘으면 삼각측량으로
   double ba_depth_sigma = 0;  // local BA 에 DA3 점 깊이 prior (log 깊이 표준편차, 0 = 끔. --depth-prior da3 의 앵커 깊이 사용)
   bool keyframes = false;     // 매핑과 상관없이 키프레임 목록 유지 (루프 클로저용)
 };
@@ -120,6 +122,7 @@ class VOTracker {
   // DA3 앵커 때 루프 스레드가 map lock 아래 기록: 키프레임 -> (맵 점 id, DA3 깊이 [m]), da3_ref = 기준 VO 단위/미터 (0 = 아직)
   std::unordered_map<int, std::vector<std::pair<int, float>>> da3;
   double da3_ref = 0;
+  std::unordered_set<int> da3_p, da3_l;  // (--da3-points) DA3 깊이로 만든 맵 점: 삼각측량은 시차가 mature_deg 를 넘을 때만 바꿈
   int n_still = 0;       // 정지로 판정한 프레임 수
   int n_map6dof = 0;     // parallax가 작아서 맵 기준 6-DoF로 추정한 프레임 수
   int n_rescued = 0;     // 2D-2D 포즈가 맵과 안 맞아서 맵 기준 6-DoF 로 다시 푼 프레임 수 (안 그러면 추적 실패)

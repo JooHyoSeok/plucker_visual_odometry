@@ -9,7 +9,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
-find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc video calib3d videoio imgcodecs features2d)
+find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc video calib3d videoio imgcodecs features2d ximgproc)
 
 # g2o (third_party/g2o, git submodule, tag 20241228_git): BSD parts only = Eigen/dense solvers, no CHOLMOD/CSparse
 # (LGPL), no OpenGL viewer (GPL), static, no apps/examples

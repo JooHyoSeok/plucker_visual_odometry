@@ -69,6 +69,10 @@ struct KFState {
   std::vector<Vec3> uvd;  // 이 키프레임에 보이는 맵 점 (u, v, VO 깊이), 최대 3000개
   std::vector<int> pid;   // uvd 와 같은 순서의 맵 점 (트랙) id
   double da3_scale = 0;   // 이 키프레임의 DA3 앵커 (VO 단위/미터, 0 = 없음)
+  std::vector<Vec2> new_uv;  // (--da3-points) 아직 성숙한 맵 점이 없는 트랙의 픽셀 / id -> DA3 깊이로 맵 점
+  std::vector<int> new_pid;
+  std::vector<Vec4> new_seg;  // (--da3-lines) 아직 성숙한 맵 라인이 없는 선분 / id -> DA3 깊이로 Plücker 라인
+  std::vector<int> new_lid;
 };
 
 class LoopVerifier {
@@ -101,7 +105,7 @@ struct LoopParams {
   int shortlist = 15;  // 검증할 후보 수
   bool feedback = true;  // PGO 결과를 포즈/맵에 되먹임 (false: 결과만 기록)
   bool threaded = true;  // false: 트래킹 스레드에서 그 자리에서 처리 (결과 재현용)
-  int max_backlog = 2;   // 큐에 이보다 많이 밀려 있으면 오래된 키프레임은 버림 (등록도 검출도 안 함)
+  int max_backlog = 2;   // 큐에 이보다 많이 밀려 있으면 DA3 앵커는 건너뜀, 4배 넘게 밀리면 오래된 키프레임은 버림
   double skip_chi2 = 0;  // 새 루프 엣지의 현재 포즈 chi2 가 이보다 작으면 (이미 맞음) 엣지만 추가, PGO 생략
   int consist_n = 1;          // ORB-SLAM3 식 연속 일관성: 연속 질의 키프레임 이 수만큼 같은 장소를 가리켜야 채택 (1 = 끔)
   int consist_frames = 30;    //   "같은 장소": 후보 프레임 차이가 이 이내, 질의 키프레임 간격도 이 이내
@@ -125,12 +129,18 @@ class LoopCloser {
   void push(int kf, const cv::Mat& img);
   // 남은 큐를 끝까지 처리하고 스레드 종료 (궤적 저장 전에 호출, map lock 은 놓은 상태로)
   void finish();
+  const std::vector<LoopEdge>& loop_edges() const { return edges_; }  // PGO 루프 엣지 (지금 맵 단위), finish() 뒤에
 
   // 아래 통계는 finish() 뒤에 읽기
   std::vector<LoopEdge> loops;  // 검출된 루프 (측정값 원본)
   double ms_detect = 0, ms_pgo = 0, ms_opt = 0;  // ms_opt: g2o optimize() 만
   double ms_blocked = 0, ms_blocked_max = 0;  // 루프 스레드가 map lock 을 잡은 시간 = 트래킹이 멈춘 시간
   int n_queries = 0, n_skipped = 0;            // n_skipped: 루프 스레드가 밀려서 버린 키프레임
+  int n_depth_skipped = 0;                     // 밀려서 DA3 앵커만 건너뛴 키프레임 (루프 검출은 함)
+  int n_bad_scale = 0;                         // 스케일 비가 1/3..3 밖이라 버린 검증 결과
+  int n_rejected_pgo = 0;                      // PGO 뒤에도 안 맞아서 버린 루프
+  long n_da3_points = 0;                       // (--da3-points) DA3 깊이로 넣은 맵 점
+  long n_da3_lines = 0;                        // (--da3-lines) DA3 깊이로 넣은 맵 라인
   int n_pgo_skipped = 0;                       // 이미 맞는 루프라 PGO 생략
   int n_anchors = 0, n_anchor_pgo = 0, n_anchor_skip = 0;  // 앵커가 붙은 키프레임, 앵커 PGO, 스케일이 맞아서 건너뛴 PGO
   int n_unconfirmed = 0, n_pruned = 0;         // 연속 일관성을 못 채운 검출, PGO 뒤 빠진 루프 엣지
@@ -139,8 +149,10 @@ class LoopCloser {
 
  private:
   void run();
-  void process(int kf, const cv::Mat& img);
+  void process(int kf, const cv::Mat& img, bool depth = true);  // depth: DA3 앵커도 (밀리면 건너뜀)
   std::unique_lock<std::mutex> take_map() { return vo_.map_lock.worker(); }  // 작업 스레드 쪽 (트래킹이 양보)
+  const Eigen::Matrix<double, 7, 7>& loop_info(const LoopEdge& e) const;
+  void add_da3_lines(const KFState& st, double a_k);  // (--da3-lines) DA3 깊이로 선분에서 바로 Plücker 라인  // DA3 루프 / 앵커 있음 / 없음
   void blocked(double ms) { ms_blocked += ms, ms_blocked_max = std::max(ms_blocked_max, ms); }
   KFState snapshot(int kf) const;
   std::unordered_map<int, Sim3> pgo(const std::vector<Pose>& P, const std::vector<int>& sub, double& cost);

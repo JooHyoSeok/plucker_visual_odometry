@@ -5,7 +5,7 @@ usage: python3 plot_traj.py --out traj.png [--suite kitti] [--mode mono] [--seqs
   first LABEL=DIR is the reference (gray), the rest get categorical colors in fixed order; GT is drawn dark.
   --paper: SLAM-paper style figure (white, serif, GT dashed black, start marker, x/z [m], shared legend,
            per-panel ATE "first -> last run", † = tracked < 95 %); also writes a PDF next to the PNG.
-  view: x (right) vs z (forward) of the GT world (KITTI: camera-0 frame, ICRA/ARKit: y is up)
+  view: x (right) vs z (forward) of the GT world (KITTI: camera-0 frame, ICRA/ARKit: y is up), EuRoC: x vs y (z is up)
 """
 import argparse
 import re
@@ -52,11 +52,12 @@ def paper_figure(jobs, runs, out, title):
     colors = ["#eb6834", "#2a78d6", "#1baf7a", "#eda100"]  # 검증된 팔레트 (orange = 이전, blue = 이후)
     ncol = min(5, len(jobs))
     nrow = (len(jobs) + ncol - 1) // ncol
-    fig, axes = plt.subplots(nrow, ncol, figsize=(3.3 * ncol, 3.2 * nrow + 0.6), squeeze=False)
+    fig, axes = plt.subplots(nrow, ncol, figsize=(max(3.3 * ncol, 7.0), 3.2 * nrow + 0.6), squeeze=False)
     for ax in axes.ravel():
         ax.axis("off")
     handles = {}
     for ax, job in zip(axes.ravel(), jobs):
+        up = 1 if job["suite"] == "euroc" else 2  # 위에서 본 평면: EuRoC 월드는 z 가 위 -> x-y, KITTI/ICRA 카메라 월드는 x-z
         ax.axis("on")
         G, ates = None, []
         for (label, d), c in zip(runs, colors):
@@ -67,19 +68,19 @@ def paper_figure(jobs, runs, out, title):
             A, Gi, drift = r
             if G is None or len(Gi) > len(G):
                 G = Gi
-            h, = ax.plot(A[:, 0], A[:, 2], color=c, linewidth=1.3, label=label)
+            h, = ax.plot(A[:, 0], A[:, up], color=c, linewidth=1.3, label=label)
             handles.setdefault(label, h)
             ate = drift / 100 * np.linalg.norm(np.diff(Gi, axis=0), axis=1).sum()
             short = len(A) < 0.95 * len(np.loadtxt(job["gt"]).reshape(-1, 12)[job["start"]::job["stride"]])
             ates.append(f"{ate:.1f}{'†' if short else ''}")
         if G is not None:
-            g, = ax.plot(G[:, 0], G[:, 2], color="black", linewidth=0.9, linestyle=(0, (4, 2)), label="Ground truth", zorder=0)
-            st, = ax.plot(G[0, 0], G[0, 2], marker="s", color="black", markersize=5, linestyle="none", label="Start", zorder=5)
+            g, = ax.plot(G[:, 0], G[:, up], color="black", linewidth=0.9, linestyle=(0, (4, 2)), label="Ground truth", zorder=0)
+            st, = ax.plot(G[0, 0], G[0, up], marker="s", color="black", markersize=5, linestyle="none", label="Start", zorder=5)
             handles.setdefault("Ground truth", g), handles.setdefault("Start", st)
         ax.set_aspect("equal", adjustable="datalim")
         ax.grid(color="#d9d9d9", linewidth=0.4)
         ax.set_xlabel("x [m]")
-        ax.set_ylabel("z [m]")
+        ax.set_ylabel("yz"[up - 1] + " [m]")
         ax.set_title(f"Sequence {job['seq']}", fontsize=10)
         ax.text(0.03, 0.97, "ATE [m]: " + " → ".join(ates), transform=ax.transAxes, va="top", fontsize=8,
                 bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=1.5))
@@ -125,6 +126,7 @@ def main():
         ax.set_facecolor(SURFACE)
         ax.axis("off")
     for ax, job in zip(axes.ravel(), jobs):
+        up = 1 if job["suite"] == "euroc" else 2  # 위에서 본 평면: EuRoC 월드는 z 가 위 -> x-y, KITTI/ICRA 카메라 월드는 x-z
         ax.axis("on")
         G = None
         notes = []
@@ -136,10 +138,10 @@ def main():
             A, Gi, drift = r
             if G is None or len(Gi) > len(G):
                 G = Gi
-            ax.plot(A[:, 0], A[:, 2], color=c, linewidth=1.6, label=label)
+            ax.plot(A[:, 0], A[:, up], color=c, linewidth=1.6, label=label)
             notes.append(f"{label}: {drift:.2f}%")
         if G is not None:
-            ax.plot(G[:, 0], G[:, 2], color=INK, linewidth=1.0, linestyle=(0, (4, 2)), label="GT", zorder=0)
+            ax.plot(G[:, 0], G[:, up], color=INK, linewidth=1.0, linestyle=(0, (4, 2)), label="GT", zorder=0)
         ax.set_aspect("equal", adjustable="datalim")
         ax.grid(color=GRID, linewidth=0.6)
         ax.tick_params(labelsize=7, colors=INK2)

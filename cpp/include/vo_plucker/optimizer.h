@@ -34,6 +34,15 @@ struct LocalBAStats {
 // vo.prm.ba_depth_sigma > 0: 키프레임이 보는 점의 깊이 = vo.da3_ref x DA3 깊이 (log, Huber) prior -> 창의 스케일을 DA3 에 묶음
 LocalBAStats local_ba(VOTracker& vo, int window = 10, int max_fixed = 10, bool lines = false, bool mature_only = false);
 
+// 전역 BA (시퀀스 끝, ORB-SLAM "+ Global BA" 와 같은 조건): 모든 키프레임 포즈 + 맵 점 (+ 라인) 재투영, DA3 깊이 prior
+// (vo.prm.ba_depth_sigma), + 루프 상대 포즈 엣지 (PGO 가 단위를 맞춘 루프 측정값의 회전 / 이동, 스케일은 DA3 prior 몫).
+// 재방문 구간의 점이 융합돼 있지 않아서 루프 엣지가 없으면 재투영만으로는 PGO 이전 모양으로 되돌아감. 처음 두 키프레임 고정
+struct LoopPose {
+  int i, j;  // 키프레임 프레임 번호, i = 나중
+  Pose T;    // cam_j -> cam_i
+};
+LocalBAStats global_ba(VOTracker& vo, const std::vector<LoopPose>& loops, bool lines);
+
 // local BA 를 세 단계로 (LocalMapping 스레드용, ORB-SLAM3 처럼 최적화는 map lock 없이):
 //   build (map lock 아래, vo 읽기만) -> solve (lock 없이) -> apply (map lock 아래, 써넣기). local_ba = 세 단계를 이어서
 struct LocalBAProblem;

@@ -39,6 +39,10 @@ Eigen::Matrix<double, 7, 7> info(double r, double t, double s) {
 const Eigen::Matrix<double, 7, 7> kInfoOdom = info(0.005, 0.02, 0.02), kInfoLoop = info(0.01, 0.05, 0.05);
 // DA3 깊이 3D 루프: 스케일 a_i/a_j 는 DA3 앵커 엣지와 같은 정보 (이중 계산 X), 이동은 깊이 잡음 (~6 % x 거리) 만큼 덜 믿음
 const Eigen::Matrix<double, 7, 7> kInfoLoopDa3 = info(0.01, 0.1, 1.0);
+// DA3 앵커가 있으면 메트릭 스케일은 앵커가 줌 -> 모든 루프 엣지의 스케일은 약하게 (EuRoC V1_01: GT 로 참인 루프의 스케일 비가
+// 0.49-2.87 로 틀려서 PGO 를 비틂). 루프는 회전 / 이동만 고침
+const Eigen::Matrix<double, 7, 7> kInfoLoopAnchored = info(0.01, 0.05, 1.0);
+constexpr double kMaxLoopChi2Post = 1e4;  // PGO 뒤 새 루프 엣지 chi2 가 이보다 크면 잘못된 루프
 
 // metric depth 앵커: 키프레임 Sim(3) 정점의 log 스케일 = 측정 (log a_k - log a_ref). Jacobian 은 g2o 수치 미분
 class EdgeScalePrior : public g2o::BaseUnaryEdge<1, double, g2o::VertexSim3Expmap> {
@@ -129,12 +133,12 @@ class OrbVerifier : public LoopVerifier {
     std::vector<cv::KeyPoint> kp;
     orb_->detectAndCompute(to_gray(img), cv::noArray(), kp, d.des);
     for (const auto& p : kp) d.pts.push_back(p.pt);
-    if (da3_ && st.da3_scale > 0) {  // DA3 깊이 3D (RGB-D 처럼): X = a_k z K^-1 [u v 1], 앵커와 같은 3-40 m 범위만
+    if (da3_ && st.da3_scale > 0) {  // DA3 깊이 3D (RGB-D 처럼): X = a_k z K^-1 [u v 1], 서버가 앵커와 같은 범위만 (밖은 0)
       std::vector<Vec2> uv;
       for (const auto& p : d.pts) uv.emplace_back(p.x, p.y);
       const std::vector<double> z = server_depth_kf(*da3_, st.kf, uv);
       for (size_t m = 0; m < z.size(); ++m)
-        if (z[m] > 3 && z[m] < 40) d.d3[m] = st.da3_scale * z[m] * cam_.Kinv * Vec3(uv[m](0), uv[m](1), 1);
+        if (z[m] > 0) d.d3[m] = st.da3_scale * z[m] * cam_.Kinv * Vec3(uv[m](0), uv[m](1), 1);
     }
     const int prev = st.prev;
     if (prev < 0 || !kf_.count(prev)) return -1;
@@ -461,6 +465,10 @@ LoopCloser::LoopCloser(VOTracker& vo, std::unique_ptr<PlaceRecognizer> pr, std::
 
 LoopCloser::~LoopCloser() { finish(); }
 
+const Eigen::Matrix<double, 7, 7>& LoopCloser::loop_info(const LoopEdge& e) const {
+  return e.da3 ? kInfoLoopDa3 : a_ref_ > 0 ? kInfoLoopAnchored : kInfoLoop;
+}
+
 void LoopCloser::push(int kf, const cv::Mat& img) {
   if (!prm_.threaded) return process(kf, img);
   {
@@ -485,14 +493,73 @@ void LoopCloser::run() {
     std::unique_lock<std::mutex> l(q_mx_);
     q_cv_.wait(l, [&] { return stop_ || !queue_.empty(); });
     if (queue_.empty()) return;  // stop_ 이고 남은 것도 다 처리함
-    // 밀려 있으면 오래된 키프레임은 버리고 (등록도 안 함) 최신 쪽만 등록 + 검출. 루프 DB 가 듬성해질 뿐 검출은 계속됨
-    // (등록만 하고 검출을 건너뛰면, 계속 밀리는 무거운 모듈에서는 검출을 한 번도 못 함)
-    while (int(queue_.size()) > prm_.max_backlog + 1) queue_.pop_front(), ++n_skipped;
+    // 밀려 있으면 DA3 (키프레임당 ~200 ms) 만 건너뛰고 루프 등록 + 검출 (썸네일 + ORB ~25 ms) 은 모든 키프레임에.
+    // 그래도 크게 밀리면 (무거운 검출 모듈) 오래된 키프레임은 버림: 등록만 하고 검출을 건너뛰면 검출을 한 번도 못 할 수 있음
+    while (int(queue_.size()) > 4 * (prm_.max_backlog + 1)) queue_.pop_front(), ++n_skipped;
+    const bool depth = int(queue_.size()) <= prm_.max_backlog + 1;
     auto [kf, img] = std::move(queue_.front());
     queue_.pop_front();
     l.unlock();
-    process(kf, img);
+    if (!depth && anchor_) ++n_depth_skipped;
+    process(kf, img, depth);
   }
+}
+
+// DA3 깊이로 선분 하나에서 바로 3D 라인 (삼각측량 불가능한 진행 방향 라인도): 3D 직선 위 점의 역깊이는 영상 선분 매개변수 s 의
+// 1차 함수 (1/z = α + β s) -> 샘플 (s, 1/z) 에 Theil-Sen 직선 -> 양 끝 깊이 -> 두 점 -> Plücker. 가림 경계는 앞쪽 (최소 깊이)
+void LoopCloser::add_da3_lines(const KFState& st, double a_k) {
+  constexpr int kS = 8;
+  constexpr double kOff = 3.0;  // 선분 법선 방향 오프셋 [px]
+  std::vector<Vec2> uv;
+  for (const Vec4& g : st.new_seg) {
+    const Vec2 p = g.head<2>(), q = g.tail<2>(), d = (q - p).normalized(), nrm(-d(1), d(0));
+    for (int i = 0; i < kS; ++i) {
+      const Vec2 x = p + (0.1 + 0.8 * i / (kS - 1)) * (q - p);
+      uv.push_back(x), uv.push_back(x + kOff * nrm), uv.push_back(x - kOff * nrm);
+    }
+  }
+  const std::vector<double> z = server_depth_kf(*anchor_, st.kf, uv);
+  std::vector<int> ids;
+  std::vector<std::pair<Vec3, Vec3>> ends;  // 카메라 좌표 양 끝점 (VO 단위) -> 아래에서 world Plücker
+  for (size_t l = 0; l < st.new_seg.size(); ++l) {
+    std::vector<std::pair<double, double>> sr;  // (s, 1/z)
+    for (int i = 0; i < kS; ++i) {
+      double zm = 0;
+      for (int k = 0; k < 3; ++k)
+        if (const double v = z[(l * kS + i) * 3 + k]; v > 0 && (zm == 0 || v < zm)) zm = v;
+      if (zm > 0) sr.emplace_back(0.1 + 0.8 * i / (kS - 1), 1 / zm);
+    }
+    if (sr.size() < 5) continue;
+    std::vector<double> sl, ic;
+    for (size_t i = 0; i < sr.size(); ++i)
+      for (size_t j = i + 1; j < sr.size(); ++j) sl.push_back((sr[j].second - sr[i].second) / (sr[j].first - sr[i].first));
+    std::nth_element(sl.begin(), sl.begin() + sl.size() / 2, sl.end());
+    const double beta = sl[sl.size() / 2];
+    for (const auto& [s, r] : sr) ic.push_back(r - beta * s);
+    std::nth_element(ic.begin(), ic.begin() + ic.size() / 2, ic.end());
+    const double alpha = ic[ic.size() / 2];
+    std::vector<double> res;
+    for (const auto& [s, r] : sr) res.push_back(std::abs(r - (alpha + beta * s)) / r);
+    std::nth_element(res.begin(), res.begin() + res.size() / 2, res.end());
+    const double r0 = alpha, r1 = alpha + beta;  // 선분 양 끝 (s = 0, 1) 역깊이
+    if (res[res.size() / 2] > 0.1 || r0 <= 0 || r1 <= 0) continue;
+    const Vec4& g = st.new_seg[l];
+    ends.emplace_back(a_k / r0 * (vo_.cam.Kinv * Vec3(g(0), g(1), 1)), a_k / r1 * (vo_.cam.Kinv * Vec3(g(2), g(3), 1)));
+    ids.push_back(st.new_lid[l]);
+  }
+  auto lk = take_map();
+  const auto tb = Clock::now();
+  const Pose& P = vo_.poses[st.kf];
+  for (size_t n = 0; n < ids.size(); ++n) {
+    const int j = ids[n];
+    if (vo_.mature_l.count(j)) continue;
+    const Vec3 A = P.R.transpose() * (ends[n].first - P.t), B = P.R.transpose() * (ends[n].second - P.t);
+    const Vec3 d = B - A;
+    Line L;
+    L << d / d.norm(), A.cross(B) / d.norm();
+    vo_.map_l[j] = L, vo_.da3_l.insert(j), ++n_da3_lines;
+  }
+  blocked(ms_since(tb));
 }
 
 KFState LoopCloser::snapshot(int kf) const {  // map lock 아래에서
@@ -509,10 +576,16 @@ KFState LoopCloser::snapshot(int kf) const {  // map lock 아래에서
   // ORB 검증기는 맵 점 전부 (3D 연결), 서버로는 300 개만 보냄
   for (size_t m = 0, n = std::min<size_t>(3000, d.size()); m < n; ++m)
     st.uvd.push_back(d[m * d.size() / n]), st.pid.push_back(ids[m * d.size() / n]);
+  if (vo_.prm.da3_points)
+    for (size_t m = 0; m < o.pid.size(); ++m)
+      if (!vo_.mature_p.count(o.pid[m])) st.new_uv.push_back(o.uv[m]), st.new_pid.push_back(o.pid[m]);
+  if (vo_.prm.da3_lines)
+    for (size_t m = 0; m < o.lid.size(); ++m)
+      if (!vo_.mature_l.count(o.lid[m])) st.new_seg.push_back(o.seg[m]), st.new_lid.push_back(o.lid[m]);
   return st;
 }
 
-void LoopCloser::process(int kf, const cv::Mat& img) {
+void LoopCloser::process(int kf, const cv::Mat& img, bool depth) {
   auto t0 = Clock::now();
   KFState st;
   {
@@ -537,7 +610,7 @@ void LoopCloser::process(int kf, const cv::Mat& img) {
     for (const auto& k : kp) md.pid.push_back(st.pid[k.class_id]), md.uv.emplace_back(k.pt.x, k.pt.y);
     kf_pids_[kf] = st.pid;
   }
-  if (anchor_) {  // metric depth (DA3) vs VO 깊이 -> 이 키프레임의 VO 단위/미터
+  if (anchor_ && depth) {  // metric depth (DA3) vs VO 깊이 -> 이 키프레임의 VO 단위/미터
     anchor_->add(kf, img);
     const std::vector<Vec3> uvd = subsample(st.uvd, 300);
     std::vector<double> z;
@@ -550,6 +623,19 @@ void LoopCloser::process(int kf, const cv::Mat& img) {
         std::nth_element(f.begin(), f.begin() + f.size() / 2, f.end());
         if (first_anchors_.size() == 10) a_ref_ = f[f.size() / 2];
       }
+      if (!st.new_uv.empty()) {  // pseudo RGB-D: 시차가 아직 작은 트랙을 DA3 깊이 (이 키프레임 VO 단위) 로 맵에. 같은 깊이맵 재사용
+        const std::vector<double> zn = server_depth_kf(*anchor_, kf, st.new_uv);
+        std::vector<std::pair<int, Vec3>> Xc;
+        for (size_t m = 0; m < zn.size(); ++m)
+          if (zn[m] > 0) Xc.emplace_back(st.new_pid[m], *av * zn[m] * (vo_.cam.Kinv * Vec3(st.new_uv[m](0), st.new_uv[m](1), 1)));
+        auto l = take_map();
+        const auto tb = Clock::now();
+        const Pose& P = vo_.poses[kf];  // 지금 (BA 로 바뀌었을 수 있는) 키프레임 포즈 기준
+        for (const auto& [j, x] : Xc)
+          if (!vo_.mature_p.count(j)) vo_.map_p[j] = P.R.transpose() * (x - P.t), vo_.da3_p.insert(j), ++n_da3_points;
+        blocked(ms_since(tb));
+      }
+      if (!st.new_seg.empty()) add_da3_lines(st, *av);
       if (vo_.prm.ba_depth_sigma > 0) {  // local BA 의 점 깊이 prior 용 (subsample 과 같은 순서로 점 id)
         std::vector<std::pair<int, float>> d;
         for (size_t m = 0; m < z.size(); ++m)
@@ -578,9 +664,11 @@ void LoopCloser::process(int kf, const cv::Mat& img) {
             ++n_excluded;
             continue;
           }
+          // 스케일 비가 1/3..3 밖이면 버림: 퇴화된 Sim(3) (EuRoC V1_01: 95-136 배 -> PGO 가 맵을 무너뜨림). KITTI 참 루프 0.66-1.53
           // 로컬 3D 루프가 있으면 그것 (더 정확), 같은 종류끼리는 인라이어 많은 것
-          if (auto e = ver_->verify(a, j); e && (!best || (best->da3 && !e->da3) || (best->da3 == e->da3 && e->inliers > best->inliers)))
-            best = e;
+          auto e = ver_->verify(a, j);
+          if (e && (e->S.s < 1.0 / 3 || e->S.s > 3)) e.reset(), ++n_bad_scale;
+          if (e && (!best || (best->da3 && !e->da3) || (best->da3 == e->da3 && e->inliers > best->inliers))) best = e;
         }
       }
     }
@@ -636,7 +724,7 @@ void LoopCloser::process(int kf, const cv::Mat& img) {
     const Pose Pa = at_sub(a), Pj = at_sub(best->j);
     const Eigen::Matrix<double, 7, 1> r =
         (g2o::Sim3(best->S.R, best->S.t, best->S.s) * g2o::Sim3(Pj.R, Pj.t, 1.0) * g2o::Sim3(Pa.R, Pa.t, 1.0).inverse()).log();
-    chi2_new = r.dot((best->da3 ? kInfoLoopDa3 : kInfoLoop) * r);
+    chi2_new = r.dot(loop_info(*best) * r);
   }
   if (best && !anchor_due && chi2_new < prm_.skip_chi2) {
     ++n_pgo_skipped;
@@ -649,6 +737,23 @@ void LoopCloser::process(int kf, const cv::Mat& img) {
   const auto S_kf = pgo(P, sub, cost);  // lock 없이: 트래킹은 계속
   since_pgo_ = 0;
   if (!best) ++n_anchor_pgo;
+  // PGO 뒤에도 새 루프 엣지가 크게 안 맞으면 (오도메트리 + 앵커와 모순) 잘못된 루프 -> 보정 안 하고 엣지 제거.
+  // 참 루프는 큰 드리프트여도 오도메트리가 휘어서 흡수 (EuRoC V1_01: 사후 비용 6.9e9 인 루프가 스케일을 1만 배로 터뜨림)
+  double chi2_post = 0;
+  if (best) {
+    const auto sim = [&](int f) { const Sim3& S = S_kf.at(f); return g2o::Sim3(S.R, S.t, S.s); };
+    const Eigen::Matrix<double, 7, 1> r = (g2o::Sim3(best->S.R, best->S.t, best->S.s) * sim(best->j) * sim(a).inverse()).log();
+    chi2_post = r.dot(loop_info(*best) * r);
+    if (!(chi2_post < kMaxLoopChi2Post)) {
+      edges_.erase(std::remove_if(edges_.begin(), edges_.end(), [&](const LoopEdge& e) { return e.i == a && e.j == best->j; }),
+                   edges_.end());
+      loops.pop_back(), ++n_rejected_pgo;
+      std::printf("    loop @frame %d <-> %d: %d Sim(3) inliers, scale ratio %.2f, edge chi2 %.1f -> after PGO %.3g: rejected\n", a,
+                  best->j, best->inliers, best->S.s, chi2_new, chi2_post);
+      ms_pgo += ms_since(t0);
+      return;
+    }
+  }
   int at = -1;
   if (prm_.feedback) {
     auto l = take_map();
@@ -665,8 +770,8 @@ void LoopCloser::process(int kf, const cv::Mat& img) {
     blocked(ms_since(tb));
   }
   if (best) {
-    std::printf("    loop @frame %d <-> %d: %d Sim(3) inliers, scale ratio %.2f, edge chi2 %.1f -> PGO cost %.1f", a,
-                best->j, best->inliers, best->S.s, chi2_new, cost);
+    std::printf("    loop @frame %d <-> %d: %d Sim(3) inliers, scale ratio %.2f, edge chi2 %.1f -> PGO cost %.1f (edge %.1f)", a,
+                best->j, best->inliers, best->S.s, chi2_new, cost, chi2_post);
     if (at >= 0) std::printf(" -> map corrected (tracking at frame %d)", at);
     std::printf("\n");
   }
@@ -706,7 +811,7 @@ std::unordered_map<int, Sim3> LoopCloser::pgo(const std::vector<Pose>& P, const 
   };
   for (size_t n = 0; n + 1 < sub.size(); ++n) add_edge(sub[n], sub[n + 1], odom_[sub[n]], kInfoOdom);
   for (const auto& e : edges_)
-    if (v.count(e.i) && v.count(e.j)) add_edge(e.j, e.i, e.S, e.da3 ? kInfoLoopDa3 : kInfoLoop);
+    if (v.count(e.i) && v.count(e.j)) add_edge(e.j, e.i, e.S, loop_info(e));
   if (a_ref_ > 0)  // metric depth 앵커: log s_k = log a_k - log a_ref (보정 뒤 VO 단위/미터 a_k / s_k = a_ref)
     for (const auto& [f, ak] : anchors_)
       if (v.count(f) && f != sub.front()) {

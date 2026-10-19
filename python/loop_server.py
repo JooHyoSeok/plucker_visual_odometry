@@ -221,7 +221,9 @@ def main():
     ap.add_argument("--ver", default="none", choices=["none", "mast3r"])
     ap.add_argument("--depth", default="none", choices=["none", "da3"])
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--depth-range", default="3,40", help="DA3 depth used for anchors / priors / 3D [m] (indoor: 0.5,20)")
     o = ap.parse_args()
+    Da3Depth.ZMIN, Da3Depth.ZMAX = (float(x) for x in o.depth_range.split(","))
     m3r = Mast3r(o.device, retrieval=o.pr == "mast3r") if "mast3r" in (o.pr, o.ver) else None  # 검색/검증이 공유
     pr = {"none": None, "netvlad": NetVLAD, "salad": Salad, "mast3r": None}[o.pr]
     pr = pr(o.device) if pr else None
@@ -259,6 +261,7 @@ def main():
                 kf, n = int(t[1]), int(t[2])
                 uv = np.array(t[3:3 + 2 * n], float).reshape(-1, 2)
                 z = depth.sample(uv) if depth and n and kf == depth_kf else np.zeros(n)
+                z = np.where((z > Da3Depth.ZMIN) & (z < Da3Depth.ZMAX), z, 0)  # 앵커와 같은 범위만
                 reply = "depth " + " ".join(f"{v:.3f}" for v in z)
             elif t[0] == "depthat":
                 n = int(t[2])
