@@ -1,6 +1,7 @@
 #include "vo_plucker/tracker.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace vp {
 
@@ -82,9 +83,17 @@ std::vector<int> VOTracker::add(FrameObs o, const std::optional<Pose>& r, const 
   poses.emplace_back();
   has_pose.push_back(0);
   if (r) rel[k] = *r;
-  if (failed_at >= 0 || k == 0) return {};
+  if (failed_at >= 0) return {};
   if (init_frame_ >= 0) return track(k) ? std::vector<int>{k} : std::vector<int>{};
-  if (!init) return {};  // 초기화 전: 버퍼링
+  if (prm.use_depth) {  // 깊이 초기화: 깊이 있는 점이 충분한 첫 프레임 = world (그 전 프레임은 포즈 없음)
+    int nd = 0;
+    for (float d : obs[k].depth) nd += std::isfinite(d);
+    if (nd < prm.init_min_points) return {};
+    init_frame_ = k, poses[k] = Pose{}, has_pose[k] = 1, kfs = {k};
+    add_depth_points(k);
+    return {k};
+  }
+  if (k == 0 || !init) return {};  // 초기화 전: 버퍼링
 
   // frame 0 & 초기화 프레임 I: 초기화 후 1..I-1을 몰아서 추적
   const int I = init_frame_ = k;
@@ -108,6 +117,17 @@ std::vector<int> VOTracker::add(FrameObs o, const std::optional<Pose>& r, const 
     return {};
   }
   return done;
+}
+
+void VOTracker::add_depth_points(int k) {
+  const FrameObs& o = obs[k];
+  const Pose& p = poses[k];
+  for (size_t i = 0; i < o.depth.size(); ++i) {
+    const int j = o.pid[i];
+    if (!std::isfinite(o.depth[i]) || mature_p.count(j)) continue;
+    map_p[j] = p.R.transpose() * (double(o.depth[i]) * (cam.Kinv * Vec3(o.uv[i](0), o.uv[i](1), 1.0)) - p.t);
+    mature_p.insert(j), ++n_depth_pts;
+  }
 }
 
 void VOTracker::reset_init() {
@@ -183,9 +203,11 @@ bool VOTracker::is_keyframe(int k, int n_map_used) const {
 bool VOTracker::track(int k) {
   // constant-velocity prediction
   Pose p0;
-  if (k >= 2) {
+  if (k >= 2 && has_pose[k - 2] && has_pose[k - 1]) {
     p0 = const_velocity(poses[k - 2], poses[k - 1]);
-  } else {  // k=1: 초기화 포즈를 선형 보간한 값에서 시작
+  } else if (k > init_frame_) {  // 깊이 초기화 직후: 직전 포즈 그대로
+    p0 = poses[k - 1];
+  } else {  // 2-view 초기화 사이의 k=1: 초기화 포즈를 선형 보간한 값에서 시작
     p0 = Pose{poses[k - 1].R, poses[init_frame_].t / init_frame_};
   }
 
@@ -221,6 +243,7 @@ bool VOTracker::track(int k) {
   }
 
   auto rit = rel.find(k);
+  if (prm.use_depth && prm.depth_6dof) rit = rel.end();  // metric 맵이 있으니 맵 기준 6-DoF (RGB-D VO 방식)
   if (rit != rel.end()) {
     bool weak = prm.catchup_6dof && k < init_frame_;  // 초기화 사이 프레임: 맵(0, I baseline)이 2D-2D보다 확실함
     if (!weak && prm.rel_min_px > 0) {  // 2D-2D 회전으로 보정한 맵 점 트랙 flow가 작으면 이동 방향이 노이즈
@@ -285,6 +308,7 @@ bool VOTracker::track(int k) {
     kfs.push_back(k);
     update_map(k);
   }
+  if (prm.use_depth) add_depth_points(k);  // 깊이 있는 점은 삼각측량 결과보다 우선
   return true;
 }
 

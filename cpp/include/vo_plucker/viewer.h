@@ -17,8 +17,8 @@ namespace vp {
 
 class Viewer {
  public:
-  // gt_centers: GT camera centers (KITTI T_wc translations), gt_R0/gt_t0: GT frame 0 T_cw. 비워두면 GT 없음
-  Viewer(const Camera& cam, std::vector<Vec3> gt_centers = {}, const Pose& gt_cw0 = {});
+  // gt_cw: 프레임별 GT T_cw (비워두면 GT 없음). 추정 궤적이 시작한 프레임의 GT 포즈를 원점으로 맞춰 그림
+  explicit Viewer(const Camera& cam, std::vector<Pose> gt_cw = {});
   ~Viewer();
   void update(const cv::Mat& bgr, const VOTracker& vo);  // 추적 스레드: 방금 넣은 프레임 기준 스냅샷
   bool paused() const { return pause_; }
@@ -31,7 +31,8 @@ class Viewer {
   void draw_map(bool pts, bool lines, bool gt);
 
   Camera cam_;
-  std::vector<Vec3> gt_;  // GT centers in VO frame-0 camera coordinates [m]
+  std::vector<Pose> gt_cw_;
+  int f0_ = -1;  // 처음 포즈가 생긴 프레임
   std::thread th_;
   std::atomic<bool> pause_{false}, closed_{false}, quit_{false};
   std::string snapshot_;

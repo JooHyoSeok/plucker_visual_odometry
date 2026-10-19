@@ -1,5 +1,6 @@
 #include "vo_plucker/viewer.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <opencv2/imgproc.hpp>
@@ -67,8 +68,7 @@ void draw_camera(const Pose& p, double w) {
 }
 }  // namespace
 
-Viewer::Viewer(const Camera& cam, std::vector<Vec3> gt_centers, const Pose& gt_cw0) : cam_(cam) {
-  for (const Vec3& C : gt_centers) gt_.push_back(gt_cw0.R * C + gt_cw0.t);  // GT를 frame-0 카메라 좌표로
+Viewer::Viewer(const Camera& cam, std::vector<Pose> gt_cw) : cam_(cam), gt_cw_(std::move(gt_cw)) {
   th_ = std::thread(&Viewer::run, this);
 }
 
@@ -129,6 +129,7 @@ void Viewer::update(const cv::Mat& bgr, const VOTracker& vo) {
     if (const auto it = vo.map_p.find(j); tracked && it != vo.map_p.end()) vis.push_back(it->second);
 
   std::lock_guard<std::mutex> lk(mu_);
+  if (f0_ < 0 && tracked) f0_ = std::find(vo.has_pose.begin(), vo.has_pose.end(), 1) - vo.has_pose.begin();
   img_ = img, img_new_ = true;
   traj_.swap(traj), pts_all_.swap(all), pts_vis_.swap(vis);
   for (auto it = segs_.begin(); it != segs_.end();) it = vo.map_l.count(it->first) ? std::next(it) : segs_.erase(it);
@@ -173,16 +174,19 @@ void Viewer::draw_map(bool show_pts, bool show_lines, bool show_gt) {
     for (int j : segs_vis_) glVertex3dv(segs_[j].first.data()), glVertex3dv(segs_[j].second.data());
     glEnd();
   }
-  if (show_gt && !gt_.empty() && traj_.size() > 1) {
-    // 원점 고정 정렬: 스케일 하나만 처음 50프레임으로 (VO 단위로 GT를 맞춤)
+  if (show_gt && f0_ >= 0 && f0_ < int(gt_cw_.size()) && traj_.size() > 1) {
+    // 원점 고정 정렬: 시작 프레임 GT 카메라 좌표로 옮기고, 스케일 하나만 처음 50프레임으로 (VO 단위로 GT를 맞춤)
+    const Pose& g0 = gt_cw_[f0_];
+    std::vector<Vec3> Y;
+    for (size_t f = f0_; f < gt_cw_.size(); ++f) Y.push_back(g0.R * center(gt_cw_[f]) + g0.t);
     double num = 0, den = 0;
-    for (size_t f = 0; f < std::min<size_t>({50, traj_.size(), gt_.size()}); ++f)
-      num += traj_[f].dot(gt_[f]), den += traj_[f].squaredNorm();
+    for (size_t f = 0; f < std::min<size_t>({50, traj_.size(), Y.size()}); ++f)
+      num += traj_[f].dot(Y[f]), den += traj_[f].squaredNorm();
     const double s = num / std::max(den, 1e-12);
     glLineWidth(2);
     glColor3f(0.85f, 0.85f, 0.85f);
     glBegin(GL_LINE_STRIP);
-    for (const Vec3& Y : gt_) glVertex3d(Y(0) / s, Y(1) / s, Y(2) / s);
+    for (const Vec3& y : Y) glVertex3d(y(0) / s, y(1) / s, y(2) / s);
     glEnd();
   }
   glLineWidth(2.5);

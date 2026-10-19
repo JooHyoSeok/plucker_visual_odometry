@@ -4,6 +4,8 @@
 //            kf_mapping: only at keyframes, from keyframe observations (else every frame, all observations)
 //   init   : whenever an init pose (frame 0 -> current) is passed to add() (the caller decides when: parallax)
 //   still  : median flow of map-point tracks < still_px -> stationary, pose kept, no mapping
+//   depth  : (use_depth) metric depth per point (e.g. LiDAR / depth network): init from one frame, points with depth
+//            go straight into the map (frozen), tracking 6-DoF against the map; points without depth are triangulated
 #pragma once
 #include <string>
 #include <unordered_map>
@@ -18,6 +20,7 @@ struct FrameObs {
   std::vector<Vec2> uv;
   std::vector<int> lid;  // line track ids
   std::vector<Vec4> seg;  // [x1, y1, x2, y2]
+  std::vector<float> depth;  // (선택) 점별 metric depth [m], pid와 같은 순서, 없으면 NaN. 비어 있으면 깊이 없음
 
   void index();  // pid/lid -> 위치 맵 생성 (point()/line() 전에 호출)
   const Vec2* point(int j) const;
@@ -46,6 +49,8 @@ struct TrackerParams {
   double kf_parallax_px = 10; // 직전 키프레임 대비 회전 보정 parallax 중앙값이 이 이상이면 키프레임
   int kf_min_map = 150;       // 추적에 쓴 맵 대응이 이보다 적으면 (parallax 2 px 이상일 때) 키프레임
   int kf_max_gap = 8;         // 키프레임 최대 간격 [frames] (parallax 2 px 이상일 때)
+  bool use_depth = false;     // FrameObs::depth 사용 (깊이 초기화 + 깊이 맵 점)
+  bool depth_6dof = true;     // use_depth일 때 2D-2D 대신 맵 기준 6-DoF로 추적
 };
 
 class VOTracker {
@@ -76,6 +81,7 @@ class VOTracker {
   std::vector<int> kfs;  // 키프레임 번호 (오름차순)
   int n_still = 0;       // 정지로 판정한 프레임 수
   int n_map6dof = 0;     // parallax가 작아서 맵 기준 6-DoF로 추정한 프레임 수
+  long n_depth_pts = 0;  // 깊이로 만든 맵 점 수
   int failed_at = -1;  // tracking 실패 프레임 (-1 = 정상), 실패 후에는 추적 안 함 (relocalization 없음)
   std::string fail_reason;
   std::string init_note;  // 마지막 초기화 시도가 거절된 이유
@@ -85,6 +91,7 @@ class VOTracker {
   bool track(int k);
   void update_map(int k);
   bool is_keyframe(int k, int n_map_used) const;
+  void add_depth_points(int k);  // 프레임 k의 깊이 있는 트랙 -> 맵 점 (확정)
   void reset_init();  // 초기화 취소: 맵/포즈를 비우고 초기화 전 상태로
   int init_frame_ = -1;
   bool fail(int k, const char* why) {
