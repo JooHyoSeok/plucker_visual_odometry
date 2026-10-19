@@ -1,6 +1,6 @@
 // C++ monocular VO (points + Plücker lines): images in one by one -> pose out. No loop closure yet.
 // usage: run_vo [n_frames] --video PATH|CAM_INDEX [--gt PATH] [--calib fx,fy,cx,cy] [--no-lines] [--traj OUT.txt]
-//               [--no-viewer] [--snapshot OUT.png]
+//               [--init-frame N] [--no-viewer] [--snapshot OUT.png]
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -79,7 +79,7 @@ int main(int argc, char** argv) {
   if (!src) {
     std::fprintf(stderr,
                  "usage: %s [n_frames] --video PATH|CAM_INDEX [--gt PATH] [--calib fx,fy,cx,cy] [--no-lines] "
-                 "[--traj OUT.txt] [--no-viewer] [--snapshot OUT.png]\n",
+                 "[--traj OUT.txt] [--init-frame N] [--no-viewer] [--snapshot OUT.png]\n",
                  argv[0]);
     return 2;
   }
@@ -88,6 +88,7 @@ int main(int argc, char** argv) {
   std::sscanf(arg(argc, argv, "--calib", "707.0912,707.0912,601.8873,183.1104"), "%lf,%lf,%lf,%lf", &fx, &fy, &cx, &cy);
   TrackerParams prm;
   prm.use_lines = !flag(argc, argv, "--no-lines");
+  prm.init_frame = std::atoi(arg(argc, argv, "--init-frame", "3"));  // 시작 때 거의 정지해 있으면 키워야 함 (07: 8)
   const char* gt_path = arg(argc, argv, "--gt", nullptr);
   const auto gt = gt_path ? load_kitti(gt_path) : std::vector<Eigen::Matrix<double, 3, 4>>{};
 
