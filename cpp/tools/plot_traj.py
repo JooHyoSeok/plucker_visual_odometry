@@ -59,9 +59,9 @@ def main():
         jobs = [j for j in bm.icra_jobs(o.seqs, [o.mode], Path(runs[0][1])) if j["mode"] == o.mode]
     colors = [REF] + SERIES[: len(runs) - 1]
 
-    ncol = 4
+    ncol = min(4, len(jobs))
     nrow = (len(jobs) + ncol - 1) // ncol
-    fig, axes = plt.subplots(nrow, ncol, figsize=(4.2 * ncol, 4.0 * nrow), facecolor=SURFACE)
+    fig, axes = plt.subplots(nrow, ncol, figsize=(4.2 * ncol, 4.0 * nrow), facecolor=SURFACE, squeeze=False)
     for ax in axes.ravel():
         ax.set_facecolor(SURFACE)
         ax.axis("off")
@@ -90,10 +90,10 @@ def main():
         ax.text(0.02, 0.02, "\n".join(notes), transform=ax.transAxes, fontsize=7.5, color=INK2, va="bottom",
                 bbox=dict(facecolor=SURFACE, edgecolor="none", alpha=0.8, pad=1.5))
     h, l = next(ax for ax in axes.ravel() if ax.lines).get_legend_handles_labels()
-    fig.legend(h, l, loc="upper right", ncol=len(l), frameon=False, fontsize=9)
+    fig.legend(h, l, loc="lower center", ncol=len(l), frameon=False, fontsize=9)
     fig.suptitle(o.title or "top view, Sim(3)-aligned to GT (drift % = ATE / path)", color=INK, fontsize=12, x=0.01,
                  ha="left")
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.tight_layout(rect=(0, 0.05, 1, 0.95))
     fig.savefig(o.out, dpi=110, facecolor=SURFACE)
     print("saved", o.out)
 

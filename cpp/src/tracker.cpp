@@ -79,8 +79,8 @@ std::vector<int> VOTracker::inconsistent_tracks(double px) const {
 std::vector<int> VOTracker::add(FrameObs o, const std::optional<Pose>& r, const std::optional<Pose>& init) {
   const int k = obs.size();
   o.index();
-  for (int j : o.pid) first_p.emplace(j, k);  // emplace = setdefault (처음 본 프레임 유지)
-  for (int j : o.lid) first_l.emplace(j, k);
+  for (int j : o.pid) first_p.emplace(j, k), last_p[j] = k;  // emplace = setdefault (처음 본 프레임 유지)
+  for (int j : o.lid) first_l.emplace(j, k), last_l[j] = k;
   obs.push_back(std::move(o));
   poses.emplace_back();
   has_pose.push_back(0);
@@ -304,7 +304,7 @@ bool VOTracker::track(int k) {
 
   poses[k] = Pose{orthonormalize(p1.R), p1.t};
   has_pose[k] = 1;
-  const bool kf = k > init_frame_ && (prm.kf_mapping || prm.local_ba) && is_keyframe(k, kept.X.size());
+  const bool kf = k > init_frame_ && (prm.kf_mapping || prm.local_ba || prm.keyframes) && is_keyframe(k, kept.X.size());
   if (kf) kfs.push_back(k);
   if (!prm.kf_mapping || kf) update_map(k);
   if (prm.use_depth) add_depth_points(k);  // 깊이 있는 점은 삼각측량 결과보다 우선

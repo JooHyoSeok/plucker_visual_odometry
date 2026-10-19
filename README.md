@@ -33,6 +33,28 @@ git clone --depth 1 --filter=blob:none --sparse https://github.com/luigifreda/py
 cd data_dl/pyslam && git sparse-checkout set data/videos/kitti06 && cd ../..
 ```
 
+## C++ (`cpp/`, real-time)
+```bash
+git submodule update --init cpp/third_party/g2o
+cmake -S cpp -B cpp/build -DPangolin_DIR=<Pangolin build dir>   # viewer is optional (built only if Pangolin is found)
+cmake --build cpp/build -j8
+cpp/build/run_vo --video dataset/sequences/00/image_2/%06d.png --gt dataset/poses/00.txt \
+                 --calib 718.856,718.856,607.1928,185.2157 --loop --sim3-align
+```
+- Viewer start screen: choose loop closure, detector, verifier and lines in the menu, then press Start
+  (`--autostart` skips it, `--no-viewer` uses the flags only).
+- Loop closure: `--loop` = built-in thumbnail retrieval + ORB / 3D-3D Sim(3) verification + Sim(3) pose graph (g2o),
+  written back into poses and map. Pluggable modules: `--loop-pr thumb|netvlad|salad|mast3r`,
+  `--loop-ver orb|mast3r|orb+mast3r` (orb+mast3r: ORB geometric check first, then MASt3R Sim(3)).
+  The learned modules run in `python/loop_server.py`, started with `--loop-python <python with hloc / SALAD / MASt3R>`
+  (checkpoint paths at the top of that file; MASt3R is CC BY-NC-SA).
+- Loop closing runs in its own thread (ORB-SLAM3 style: tracking holds the map lock per frame, PGO runs without it).
+  `--loop-sync` runs it inline (deterministic, for A/B comparisons). `--loop-skip-chi2 X` (default 50): a new loop
+  edge that already fits the current estimate is added without re-running the PGO.
+- KITTI Sim(3) ATE with the built-in loop closure: 00 101 m -> about 5 m, 06 48 m -> 14-23 m (varies run to run).
+- Benchmark over many sequences: `python3 cpp/tools/benchmark.py --suite kitti --args="--loop"`,
+  plots: `cpp/tools/plot_bench.py`, `cpp/tools/plot_traj.py`.
+
 ## Run (online)
 ```python
 from slam_online import OnlineSLAM

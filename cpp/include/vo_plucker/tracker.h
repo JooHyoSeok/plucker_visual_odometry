@@ -55,6 +55,7 @@ struct TrackerParams {
   bool local_ba = false;      // 키프레임마다 local BA (g2o, 점만): 키프레임 선택은 is_keyframe
   int ba_window = 10;         // local BA에서 최적화하는 최근 키프레임 수
   int ba_fixed = 10;          // 같은 점을 보는 그 앞 키프레임을 최대 이만큼 고정
+  bool keyframes = false;     // 매핑과 상관없이 키프레임 목록 유지 (루프 클로저용)
 };
 
 class VOTracker {
@@ -81,6 +82,7 @@ class VOTracker {
   std::unordered_map<int, Line> map_l;
   std::unordered_set<int> mature_p, mature_l;
   std::unordered_map<int, int> first_p, first_l;
+  std::unordered_map<int, int> last_p, last_l;  // 랜드마크를 마지막으로 본 프레임 (루프 보정 기준)
   std::unordered_map<int, Pose> rel;
   std::vector<int> kfs;  // 키프레임 번호 (오름차순)
   int n_still = 0;       // 정지로 판정한 프레임 수

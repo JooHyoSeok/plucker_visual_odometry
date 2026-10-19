@@ -5,9 +5,12 @@
 //           coordinates, yellow segments = position error every 10 frames, ATE shown in the menu
 //   bottom: current image with tracked points / lines and the map reprojected into it
 // The tracking thread calls update() after every frame; drawing happens in the viewer thread.
+// Start screen (optional): pick loop closure / detector / verifier / lines in the menu, then "Start".
 #pragma once
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
+#include <optional>
 #include <opencv2/core.hpp>
 #include <string>
 #include <thread>
@@ -17,11 +20,21 @@
 
 namespace vp {
 
+struct RunOptions {  // 시작 화면에서 고르는 것 (기본값 = 명령행 인자)
+  bool loop = false;
+  std::string pr = "thumb", ver = "orb";  // --loop-pr / --loop-ver 와 같은 이름
+  bool lines = true;
+};
+
 class Viewer {
  public:
   // gt_cw: 프레임별 GT T_cw (비워두면 GT 없음). 추정 궤적이 시작한 프레임의 GT 포즈를 원점으로 맞춰 그림
-  explicit Viewer(const Camera& cam, std::vector<Pose> gt_cw = {}, bool sim3_align = false);
+  // start: 주면 메뉴에 시작 화면 (wait_start() 로 Start 를 기다림)
+  explicit Viewer(const Camera& cam, std::vector<Pose> gt_cw = {}, bool sim3_align = false,
+                  std::optional<RunOptions> start = std::nullopt);
   ~Viewer();
+  // Start 를 누를 때까지 대기 -> 고른 옵션. 그 전에 창을 닫으면 nullopt
+  std::optional<RunOptions> wait_start();
   void update(const cv::Mat& bgr, const VOTracker& vo);  // 추적 스레드: 방금 넣은 프레임 기준 스냅샷
   bool paused() const { return pause_; }
   bool closed() const { return closed_; }
@@ -41,6 +54,9 @@ class Viewer {
   std::thread th_;
   std::atomic<bool> pause_{false}, closed_{false}, quit_{false};
   std::string snapshot_;
+  std::optional<RunOptions> start_;  // 시작 화면 기본값 / Start 뒤에는 고른 값
+  bool started_ = false;
+  std::condition_variable start_cv_;
 
   std::mutex mu_;  // 아래 스냅샷 보호
   cv::Mat img_;

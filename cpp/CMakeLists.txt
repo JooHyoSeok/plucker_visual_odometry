@@ -9,7 +9,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
-find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc video calib3d videoio imgcodecs)
+find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc video calib3d videoio imgcodecs features2d)
 
 # g2o (third_party/g2o, git submodule, tag 20241228_git): BSD parts only = Eigen/dense solvers, no CHOLMOD/CSparse
 # (LGPL), no OpenGL viewer (GPL), static, no apps/examples
@@ -21,7 +21,7 @@ endforeach()
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/g2o EXCLUDE_FROM_ALL)
 
-add_library(vo_plucker src/geometry.cpp src/tracker.cpp src/frontend.cpp src/optimizer.cpp)
+add_library(vo_plucker src/geometry.cpp src/tracker.cpp src/frontend.cpp src/optimizer.cpp src/loop_closing.cpp)
 target_include_directories(vo_plucker PUBLIC include ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(vo_plucker PUBLIC Eigen3::Eigen ${OpenCV_LIBS} core stuff solver_eigen solver_dense types_sba types_slam3d
                       types_sim3)
@@ -29,6 +29,7 @@ target_compile_options(vo_plucker PRIVATE -Wall -Wextra)
 
 add_executable(run_vo apps/run_vo.cpp)
 target_link_libraries(run_vo vo_plucker)
+target_compile_definitions(run_vo PRIVATE VP_LOOP_SERVER="${CMAKE_CURRENT_SOURCE_DIR}/../python/loop_server.py")
 
 # viewer (optional): cmake ... -DPangolin_DIR=<Pangolin build or install dir>
 find_package(Pangolin QUIET)

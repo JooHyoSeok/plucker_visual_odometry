@@ -5,3 +5,4 @@ out_*/
 build/
 .cache/
 build_dev/
+build_tsan/

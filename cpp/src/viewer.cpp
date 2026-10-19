@@ -68,9 +68,15 @@ void draw_camera(const Pose& p, double w) {
 }
 }  // namespace
 
-Viewer::Viewer(const Camera& cam, std::vector<Pose> gt_cw, bool sim3_align)
-    : cam_(cam), gt_cw_(std::move(gt_cw)), align_init_(sim3_align) {
+Viewer::Viewer(const Camera& cam, std::vector<Pose> gt_cw, bool sim3_align, std::optional<RunOptions> start)
+    : cam_(cam), gt_cw_(std::move(gt_cw)), align_init_(sim3_align), start_(std::move(start)) {
   th_ = std::thread(&Viewer::run, this);
+}
+
+std::optional<RunOptions> Viewer::wait_start() {
+  std::unique_lock<std::mutex> lk(mu_);
+  start_cv_.wait(lk, [&] { return started_ || closed_; });
+  return started_ ? start_ : std::nullopt;
 }
 
 Viewer::~Viewer() {
@@ -231,7 +237,7 @@ void Viewer::draw_map(bool show_pts, bool show_lines, bool show_gt, const Eigen:
 }
 
 void Viewer::run() {
-  const int W = 1280, H = 960, PANEL = 170;
+  const int W = 1280, H = 960, PANEL = 200;
   const double img_frac = 0.32;  // 아래쪽 영상 영역 비율
   pangolin::CreateWindowAndBind("vo_plucker", W, H);
   glEnable(GL_DEPTH_TEST);
@@ -239,6 +245,32 @@ void Viewer::run() {
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
   pangolin::CreatePanel("menu").SetBounds(img_frac, 1.0, 0.0, pangolin::Attach::Pix(PANEL));
+  // 시작 화면: 체크박스 묶음을 서로 배타적으로 (Pangolin 에 콤보박스가 없음). Start 뒤에는 잠금
+  using Box = std::unique_ptr<pangolin::Var<bool>>;
+  const std::vector<std::string> PR{"thumb", "netvlad", "salad", "mast3r"}, VER{"orb", "mast3r", "orb+mast3r"};
+  Box start_btn, ui_loop, ui_lines;
+  std::vector<Box> ui_pr, ui_ver;
+  std::unique_ptr<pangolin::Var<std::string>> ui_state;
+  int sel_pr = 0, sel_ver = 0;
+  if (start_) {
+    start_btn = std::make_unique<pangolin::Var<bool>>("menu.Start", false, false);
+    ui_state = std::make_unique<pangolin::Var<std::string>>("menu.State", "press Start");
+    ui_loop = std::make_unique<pangolin::Var<bool>>("menu.Loop closure", start_->loop, true);
+    for (size_t i = 0; i < PR.size(); ++i) {
+      ui_pr.push_back(std::make_unique<pangolin::Var<bool>>("menu.Detect " + PR[i], PR[i] == start_->pr, true));
+      if (PR[i] == start_->pr) sel_pr = i;
+    }
+    for (size_t i = 0; i < VER.size(); ++i) {
+      ui_ver.push_back(std::make_unique<pangolin::Var<bool>>("menu.Verify " + VER[i], VER[i] == start_->ver, true));
+      if (VER[i] == start_->ver) sel_ver = i;
+    }
+    ui_lines = std::make_unique<pangolin::Var<bool>>("menu.Track lines", start_->lines, true);
+  }
+  auto exclusive = [&](std::vector<Box>& box, int& sel) {  // 클릭한 것 하나만 켜짐 (Start 뒤에는 클릭 무시)
+    for (int i = 0; i < int(box.size()); ++i)
+      if (box[i]->GuiChanged() && !started_) sel = i;
+    for (int i = 0; i < int(box.size()); ++i) *box[i] = i == sel;
+  };
   pangolin::Var<bool> follow("menu.Follow camera", true, true), show_pts("menu.Points", true, true),
       show_lines("menu.Lines", true, true), show_gt("menu.Ground truth", true, true), pause("menu.Pause", false, true),
       top("menu.Top view", false, false), align("menu.Sim3 align", align_init_, true);
@@ -256,6 +288,17 @@ void Viewer::run() {
   last_twc.SetIdentity();
   int snap_frames = -1;
   while (!pangolin::ShouldQuit() && !quit_) {
+    if (start_) {
+      exclusive(ui_pr, sel_pr), exclusive(ui_ver, sel_ver);
+      if (started_) *ui_loop = start_->loop, *ui_lines = start_->lines;
+      if (pangolin::Pushed(*start_btn) && !started_) {
+        std::lock_guard<std::mutex> lk(mu_);
+        *start_ = RunOptions{bool(*ui_loop), PR[sel_pr], VER[sel_ver], bool(*ui_lines)};
+        started_ = true;
+        *ui_state = start_->loop ? "running: " + start_->pr + " + " + start_->ver : "running: no loop";
+        start_cv_.notify_all();
+      }
+    }
     glClearColor(0.1f, 0.1f, 0.12f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     {
@@ -298,7 +341,11 @@ void Viewer::run() {
     if (snap_frames > 0 && --snap_frames == 0) break;
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-  closed_ = true;
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    closed_ = true;
+  }
+  start_cv_.notify_all();
   pangolin::DestroyWindow("vo_plucker");
   
 }
