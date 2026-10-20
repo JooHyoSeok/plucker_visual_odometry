@@ -491,6 +491,11 @@ std::unique_ptr<LoopVerifier> make_orb_verifier(const Camera& cam, int min_f, st
 std::shared_ptr<LoopServer> start_loop_server(const std::string& cmd) { return std::make_shared<LoopServer>(cmd); }
 std::vector<double> server_depth_at(LoopServer& s, const cv::Mat& img, const std::vector<Vec2>& uv) { return s.depth_at(img, uv); }
 std::vector<double> server_depth_kf(LoopServer& s, int kf, const std::vector<Vec2>& uv) { return s.depth_kf(kf, uv); }
+void server_depth_range(LoopServer& s, double zmin, double zmax) {
+  std::ostringstream q;
+  q << "range " << zmin << " " << zmax;
+  s.ask(q.str());
+}
 std::unique_ptr<PlaceRecognizer> make_py_recognizer(std::shared_ptr<LoopServer> srv, double min_sim) {
   return std::make_unique<PyRecognizer>(std::move(srv), min_sim);
 }
@@ -533,6 +538,7 @@ LoopCloser::~LoopCloser() { finish(); }
 const Eigen::Matrix<double, 7, 7>& LoopCloser::loop_info(const LoopEdge& e) const {
   return e.da3 ? kInfoLoopDa3 : a_ref_ > 0 ? kInfoLoopAnchored : kInfoLoop;
 }
+
 
 void LoopCloser::push(int kf, const cv::Mat& img) {
   if (!prm_.threaded) return process(kf, img);

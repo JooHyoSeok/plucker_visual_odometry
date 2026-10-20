@@ -36,55 +36,35 @@ cd data_dl/pyslam && git sparse-checkout set data/videos/kitti06 && cd ../..
 ## C++ (`cpp/`, real-time)
 ```bash
 git submodule update --init cpp/third_party/g2o
-cmake -S cpp -B cpp/build -DPangolin_DIR=<Pangolin build dir>   # viewer is optional (built only if Pangolin is found)
+cmake -S cpp -B cpp/build -DPangolin_DIR=<Pangolin build dir> -DVP_PYTHON=<python with Depth Anything 3>  # viewer optional
 cmake --build cpp/build -j8
-cpp/build/run_vo --video dataset/sequences/00/image_2/%06d.png --gt dataset/poses/00.txt \
-                 --calib 718.856,718.856,607.1928,185.2157 --loop --sim3-align
+cpp/build/run_vo --video dataset/sequences/00/image_2/%06d.png --gt dataset/poses/00.txt
 ```
-- Viewer start screen: choose loop closure, detector, verifier and lines in the menu, then press Start
-  (`--autostart` skips it, `--no-viewer` uses the flags only).
-- Loop closure: `--loop` = built-in thumbnail retrieval + ORB / 3D-3D Sim(3) verification + Sim(3) pose graph (g2o),
-  written back into poses and map. Pluggable modules: `--loop-pr thumb|netvlad|salad|mast3r`,
-  `--loop-ver orb|mast3r|orb+mast3r` (orb+mast3r: ORB geometric check first, then MASt3R Sim(3)).
-  The learned modules run in `python/loop_server.py`, started with `--loop-python <python with hloc / SALAD / MASt3R>`
-  (checkpoint paths at the top of that file; MASt3R is CC BY-NC-SA).
-- Loop closing runs in its own thread (ORB-SLAM3 style: tracking holds the map lock per frame, PGO runs without it).
-  `--loop-sync` runs it inline (deterministic, for A/B comparisons). `--loop-skip-chi2 X` (default 50): a new loop
-  edge that already fits the current estimate is added without re-running the PGO.
-- KITTI Sim(3) ATE with the built-in loop closure: 00 101 m -> about 5 m, 06 48 m -> 14-23 m (varies run to run).
-- Metric depth scale anchor `--depth-prior da3` (Depth Anything 3 DA3NESTED-GIANT-LARGE in `python/loop_server.py`, needs
-  `--loop-python` with depth_anything_3; ~8-10 GB GPU): per keyframe VO-units-per-meter from DA3 vs VO depth -> log-scale
-  prior edges in the Sim(3) pose graph every 10 keyframes (loop thread). KITTI 00-10 without loops: drift 2.20 -> 0.56 %,
-  t_rel 12.2 -> 2.35 %. Best combination so far: `--depth-prior da3 --loop`. `--da3-init`: initialize from DA3 depth on frame 0.
-- With DA3 (PROGRESS.md section 10): `--kf-parallax 25` (fewer keyframes, 2.4x faster), `--local-ba --ba-depth-prior 0.3`
-  (local BA with a per-point DA3 log-depth prior from the anchor depths, BA can no longer drift the window scale),
-  `--loop-da3-3d --loop-min-f 40` (ORB loop verification falls back to DA3-depth 3D of the ORB keypoints when the local
-  3D is missing / poor; used only for the first link of a new revisit). Best configuration:
-  `--depth-prior da3 --loop --kf-parallax 25 --local-ba --ba-depth-prior 0.3 --loop-da3-3d --loop-min-f 40 --loop-python <py>`.
-  At most 2 DA3 servers on one 32 GB GPU.
-- More options (PROGRESS.md section 11): `--final-gba` (global BA at the end: all keyframes + points + DA3 prior + loop
-  pose edges, writes `*_pregba.txt` too), `--da3-lines` (Plücker lines from one view: inverse depth is affine along the image
-  segment -> robust fit to DA3 depth, also lines parallel to the motion that cannot be triangulated), `--da3-points` (DA3
-  depth for keyframe tracks without enough parallax), `--da3-range MIN,MAX` (DA3 depth used, indoor 0.5,20),
-  `--realtime HZ` (feed frames at camera rate), `--fld` (FastLineDetector instead of LSD).
-- KITTI + EuRoC (PROGRESS.md section 12): `--ba-drop-obs` (local BA drops only the observations that do not fit and removes a
-  point only when fewer than 2 good ones remain; before, one bad observation deleted the whole point, and after the PGO
-  corrections whole BA windows were wiped, which lost tracking on EuRoC MH_01), `--pgo-odom-refresh 20 --pgo-odom-sigma 0.02,0.005`
-  (PGO odometry re-read from the BA-refined poses, stiffer relative scale), `--reuse-every 5` (map reuse: ORB projection
-  search re-identifies old map points). Best on both datasets (KITTI 06/07/10 3.14 / 1.40 / 4.96 m, EuRoC MH_01 / V1_01 /
-  V2_01 0.28 / 0.25 / 0.13 m): `--depth-prior da3 --loop --kf-parallax 25 --local-ba --ba-depth-prior 0.3 --loop-da3-3d
-  --loop-min-f 40 --da3-lines --final-gba --ba-drop-obs --pgo-odom-refresh 20 --pgo-odom-sigma 0.02,0.005 --reuse-every 5
-  --loop-python <py>` (EuRoC: add `--da3-range 0.5,20`; `--loop-sync --ba-sync` for deterministic runs).
-  `--da3-cache DIR` keeps the DA3 depth maps (same result every run, no GPU; fill it with `cpp/tools/da3_cache.py`).
-- Options (off by default, mixed results per sequence, see PROGRESS.md section 9): `--hybrid --hybrid-fix-rot` (translation
-  refined by map + epipolar), `--loop-consist N --loop-prune R` (loop consistency / outlier edges), `--loop-fuse` (map point
-  fusion + covisibility candidate exclusion), `--local-ba [--ba-lines]` (keyframe BA in a LocalMapping thread, Plücker lines in
-  the orthonormal 4-DoF parameterization with analytic Jacobians; `--ba-sync` runs it inline).
+- The default is the best configuration so far (PROGRESS.md sections 10-12): loop closure (thumbnail retrieval, ORB / Sim(3)
+  verification refined by bidirectional reprojection, Sim(3) pose graph in a loop thread), DA3 metric depth
+  (DA3NESTED-GIANT-LARGE in `python/loop_server.py`, ~8-10 GB GPU, inferred online per keyframe) as scale anchors in the pose
+  graph, per-point log-depth priors in local BA, single-view Plücker lines and 3D for loop verification, local BA in a
+  LocalMapping thread (bad observations dropped, points kept), map reuse by ORB projection search, tracking-failure recovery
+  and a fallback initialization from DA3 depth, and one global BA at the end (`*_pregba.txt` = the same run before it).
+- Options: `--no-loop`, `--no-da3` (plain monocular, no Python / GPU), `--no-viewer`, `--autostart` (skip the viewer start
+  menu, where loop closure / detector / verifier / lines / DA3 can be chosen). Without `--calib fx,fy,cx,cy` the intrinsics
+  come from `calib.txt` next to the image folder (KITTI odometry, EuRoC converter output). Unknown options are an error.
+- Results (`--sync`, deterministic): KITTI 06 / 07 / 10 3.14 / 1.40 / 4.96 m, 00 4.0 m; EuRoC MH_01 / V1_01 / V2_01
+  0.28 / 0.25 / 0.13 m.
+- Experiment options: `[N_FRAMES]`, `--sync` (loop closure and local BA inline: deterministic), `--da3-cache DIR` (DA3 depth
+  maps stored by image hash: identical runs without GPU, for comparisons only; fill with `cpp/tools/da3_cache.py`),
+  `--kf-out FILE`, `--realtime HZ`, `--start N`, `--stride N`, `--resize S`, `--no-lines`, `--traj-online FILE`,
+  `--dump-map FILE`, `--snapshot FILE`, `--loop-pr thumb|netvlad|salad|mast3r`, `--loop-ver orb|mast3r|orb+mast3r` (learned
+  modules in `python/loop_server.py`, MASt3R is CC BY-NC-SA), `--loop-python PY`, `--da3-range MIN,MAX` (default from the DA3
+  depth of the first frame: indoor 0.5-20 m, outdoor 3-40 m), `--depth PATTERN` (per-frame metric depth, e.g. iPhone LiDAR).
+- KITTI in the viewer, one sequence after another, then an ATE table: `cpp/tools/run_kitti_viewer.sh [OUT_DIR] [SEQ ...]`.
 - Result tools: `cpp/tools/make_video.py` (image + trajectory + error/local-scale panel; run_vo `--traj-online`),
   `cpp/tools/plot_traj.py --paper` (paper-style trajectory figure, PNG + PDF), `cpp/tools/plot_vs_orbslam.py`.
 - EuRoC MAV: `python3 cpp/tools/euroc_to_kitti.py ~/Desktop/hyoseok/EuRoC/*/SEQ` (undistorted cam0 + camera GT in
   KITTI layout), then `benchmark.py --suite euroc`.
-- Benchmark over many sequences: `python3 cpp/tools/benchmark.py --suite kitti --args="--loop"`,
+- iPhone (Stray Scanner): `python3 cpp/tools/stray_to_kitti.py odometry.csv gt.txt`, then
+  `run_vo --video rgb.mp4 --gt gt.txt --calib <camera_matrix.csv> --resize 0.5 --stride 2`.
+- Benchmark over many sequences: `python3 cpp/tools/benchmark.py --suite kitti --args="--sync --da3-cache DIR"`,
   plots: `cpp/tools/plot_bench.py`, `cpp/tools/plot_traj.py`.
 
 ## Run (online)

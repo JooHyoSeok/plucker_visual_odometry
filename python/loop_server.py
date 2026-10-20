@@ -13,6 +13,8 @@ line protocol on stdin/stdout (one reply line per request):
                                                                      pixels, image = the one added last for KF)
   depthat PATH N (u v)*N                 -> depth z1 .. zN           (--depth da3: DA3 metric depth at the pixels, 0 = invalid;
                                                                      used by run_vo --da3-init on the first frame)
+  range ZMIN ZMAX                        -> ok                       (DA3 depth range for anchors / priors / 3D [m]; run_vo picks
+                                                                     indoor 0.5-20 or outdoor 3-40 from the first frame)
   quit
 
 place recognition (--pr): netvlad (hloc, VGG16-NetVLAD-Pitts30K), salad (DINOv2-SALAD),
@@ -287,6 +289,9 @@ def main():
                 z = depth.sample(uv) if depth and n and kf == depth_kf else np.zeros(n)
                 z = np.where((z > Da3Depth.ZMIN) & (z < Da3Depth.ZMAX), z, 0)  # 앵커와 같은 범위만
                 reply = "depth " + " ".join(f"{v:.3f}" for v in z)
+            elif t[0] == "range":
+                Da3Depth.ZMIN, Da3Depth.ZMAX = float(t[1]), float(t[2])
+                reply = "ok"
             elif t[0] == "depthat":
                 n = int(t[2])
                 uv = np.array(t[3:3 + 2 * n], float).reshape(-1, 2)

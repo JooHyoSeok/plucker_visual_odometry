@@ -89,6 +89,7 @@ struct TrackerParams {
   bool da3_points = false;    // 키프레임에서 시차가 작은 트랙을 DA3 깊이로 맵 점 (pseudo RGB-D), 시차 mature_deg 넘으면 삼각측량으로
   double ba_depth_sigma = 0;  // local BA 에 DA3 점 깊이 prior (log 깊이 표준편차, 0 = 끔. --depth-prior da3 의 앵커 깊이 사용)
   bool ba_drop_obs = false;   // local BA 이상치: 안 맞는 관측만 빼고 (ORB-SLAM), 좋은 관측이 2개 미만인 점만 맵에서 제거
+  bool recover = false;       // 추적 실패 다음 프레임: 외삽 포즈 + DA3 깊이 (da3_ref 로 VO 단위) 트랙 점 -> 같은 좌표계 / 스케일로 계속
   bool keyframes = false;     // 매핑과 상관없이 키프레임 목록 유지 (루프 클로저용)
 };
 
@@ -137,8 +138,11 @@ class VOTracker {
   double ba_ms = 0;      // local BA 누적 시간
   long ba_points = 0, ba_outliers = 0, ba_lines_used = 0, ba_line_outliers = 0, ba_depth_priors = 0;
   double ba_rms_before = 0, ba_rms_after = 0;  // 누적 (실행 수로 나누면 평균)
-  int failed_at = -1;  // tracking 실패 프레임 (-1 = 정상), 실패 후에는 추적 안 함 (relocalization 없음)
+  int failed_at = -1;  // tracking 실패 프레임 (-1 = 정상), 실패 후에는 추적 안 함 (prm.recover 면 다음 프레임에 DA3 깊이로 복구)
   std::string fail_reason;
+  int n_recovered = 0;
+  // (prm.recover) 실패 상태 + DA3 기준 스케일이 있음 -> 다음 프레임 obs.depth 에 DA3 metric 깊이 [m] 를 채워서 add
+  bool wants_depth() const { return prm.recover && failed_at >= 0 && da3_ref > 0; }
   std::string init_note;  // 마지막 초기화 시도가 거절된 이유
   int line_rejected = 0;
 
@@ -148,6 +152,7 @@ class VOTracker {
   bool is_keyframe(int k, int n_map_used) const;
   void add_depth_points(int k);  // 프레임 k의 깊이 있는 트랙 -> 맵 점 (확정)
   void reset_init();  // 초기화 취소: 맵/포즈를 비우고 초기화 전 상태로
+  std::vector<int> recover(int k);  // 실패 뒤 프레임 k 복구, 반환 = 포즈가 정해진 프레임 (실패면 빈 것)
   int init_frame_ = -1;
   bool fail(int k, const char* why) {
     failed_at = k, fail_reason = why;

@@ -41,6 +41,9 @@ class Viewer {
   bool closed() const { return closed_; }
   // 시퀀스 끝: 창을 닫을 때까지 대기. snapshot 경로를 주면 한 장 저장하고 바로 종료
   void finish(const std::string& snapshot = "");
+  // 전역 BA: 시작 때 지금 ATE 를 "ATE before GBA" 칸에 고정, 끝나면 "Global BA" 칸에 걸린 시간 (ATE 칸은 계속 지금 궤적)
+  void global_ba_start();
+  void global_ba_done(double ms);
 
  private:
   void run();
@@ -55,6 +58,7 @@ class Viewer {
   std::thread th_;
   std::atomic<bool> pause_{false}, closed_{false}, quit_{false};
   std::string snapshot_;
+  std::string ate_pre_ = "-", gba_state_ = "-";  // 전역 BA 전 ATE, 전역 BA 상태
   std::optional<RunOptions> start_;  // 시작 화면 기본값 / Start 뒤에는 고른 값
   bool started_ = false;
   std::condition_variable start_cv_;

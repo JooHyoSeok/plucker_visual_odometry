@@ -156,6 +156,19 @@ void Viewer::update(const cv::Mat& bgr, const VOTracker& vo) {
   }
 }
 
+void Viewer::global_ba_start() {
+  std::lock_guard<std::mutex> lk(mu_);
+  Eigen::Matrix4d S;
+  double ate = 0;
+  if (sim3_to_gt(S, ate)) ate_pre_ = cv::format("%.2f m", ate);
+  gba_state_ = "running...";
+}
+
+void Viewer::global_ba_done(double ms) {
+  std::lock_guard<std::mutex> lk(mu_);
+  gba_state_ = cv::format("done %.1f s", ms / 1000);
+}
+
 bool Viewer::sim3_to_gt(Eigen::Matrix4d& S, double& ate) const {
   if (f0_ < 0) return false;
   const int n = std::min<int>(traj_.size(), int(gt_cw_.size()) - f0_);
@@ -275,7 +288,7 @@ void Viewer::run() {
   pangolin::Var<bool> follow("menu.Follow camera", true, true), show_pts("menu.Points", true, true),
       show_lines("menu.Lines", true, true), show_gt("menu.Ground truth", true, true), pause("menu.Pause", false, true),
       top("menu.Top view", false, false), align("menu.Sim3 align", align_init_, true);
-  pangolin::Var<std::string> ate_txt("menu.ATE", "-");
+  pangolin::Var<std::string> ate_txt("menu.ATE", "-"), ate_pre_txt("menu.ATE before GBA", "-"), gba_txt("menu.Global BA", "-");
   pangolin::OpenGlRenderState s_cam(pangolin::ProjectionMatrix(W, H, 600, 600, W / 2.0, H / 2.0, 0.1, 1e5),
                                     pangolin::ModelViewLookAt(0, -12, -25, 0, 0, 10, 0, -1, 0));
   const double map_aspect = -double(W - PANEL) / (H * (1 - img_frac));
@@ -308,6 +321,7 @@ void Viewer::run() {
       double ate = 0;
       const bool aligned = align && sim3_to_gt(S, ate);
       ate_txt = aligned ? cv::format("%.2f m s=%.2f", ate, std::cbrt(S.topLeftCorner<3, 3>().determinant())) : "-";
+      ate_pre_txt = ate_pre_, gba_txt = gba_state_;
       // 정렬 중이면 카메라도 GT 좌표계로 (Follow / Top view용, 회전과 위치만)
       Pose view = has_cur_ ? cur_ : Pose{};
       Mat3 R0 = Mat3::Identity();  // 시작 카메라 -> world (위쪽 = -카메라 y, 앞 = 카메라 z)

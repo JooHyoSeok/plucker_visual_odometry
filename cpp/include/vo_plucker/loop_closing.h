@@ -98,6 +98,7 @@ std::shared_ptr<LoopServer> start_loop_server(const std::string& cmd);
 // --depth da3 서버의 DA3 metric depth [m] (0 = 없음): run_vo --da3-init 첫 프레임 초기화용
 std::vector<double> server_depth_at(LoopServer& s, const cv::Mat& img, const std::vector<Vec2>& uv);
 std::vector<double> server_depth_kf(LoopServer& s, int kf, const std::vector<Vec2>& uv);  // 마지막 앵커 키프레임의 DA3 깊이 [m]
+void server_depth_range(LoopServer& s, double zmin, double zmax);  // 앵커 / prior / 3D 에 쓰는 DA3 깊이 범위 [m]
 std::unique_ptr<PlaceRecognizer> make_py_recognizer(std::shared_ptr<LoopServer> srv, double min_sim);
 std::unique_ptr<LoopVerifier> make_py_verifier(std::shared_ptr<LoopServer> srv, const Camera& cam);
 // ORB F-RANSAC 기하 검증 (빠름) 을 먼저 통과한 후보만 main 으로 검증

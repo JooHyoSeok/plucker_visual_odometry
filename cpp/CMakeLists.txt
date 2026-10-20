@@ -30,7 +30,10 @@ target_compile_options(vo_plucker PRIVATE -Wall -Wextra)
 
 add_executable(run_vo apps/run_vo.cpp)
 target_link_libraries(run_vo vo_plucker)
-target_compile_definitions(run_vo PRIVATE VP_LOOP_SERVER="${CMAKE_CURRENT_SOURCE_DIR}/../python/loop_server.py")
+# python for python/loop_server.py (DA3 / learned loop modules): cmake ... -DVP_PYTHON=<env>/bin/python
+set(VP_PYTHON "python3" CACHE STRING "python interpreter with Depth Anything 3 (and optional loop modules)")
+target_compile_definitions(run_vo PRIVATE VP_LOOP_SERVER="${CMAKE_CURRENT_SOURCE_DIR}/../python/loop_server.py"
+                                          VP_PYTHON="${VP_PYTHON}")
 
 # viewer (optional): cmake ... -DPangolin_DIR=<Pangolin build or install dir>
 find_package(Pangolin QUIET)

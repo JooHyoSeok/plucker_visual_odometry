@@ -85,7 +85,7 @@ std::vector<int> VOTracker::add(FrameObs o, const std::optional<Pose>& r, const 
   poses.emplace_back();
   has_pose.push_back(0);
   if (r) rel[k] = *r;
-  if (failed_at >= 0) return {};
+  if (failed_at >= 0) return recover(k);
   if (init_frame_ >= 0) return track(k) ? std::vector<int>{k} : std::vector<int>{};
   if (prm.use_depth || (prm.depth_init && !obs[k].depth.empty())) {  // 깊이 초기화: 깊이 있는 점이 충분한 첫 프레임 = world
     int nd = 0;
@@ -131,6 +131,37 @@ void VOTracker::add_depth_points(int k) {
     if (prm.use_depth) mature_p.insert(j);  // LiDAR 깊이는 고정, --da3-init 점은 시차가 생기면 삼각측량으로 바뀜
     ++n_depth_pts;
   }
+}
+
+std::vector<int> VOTracker::recover(int k) {
+  // 단안 재초기화는 스케일 / 좌표계가 새로 정해지지만, DA3 metric 깊이 x da3_ref (VO 단위 / 미터) 로 트랙 점을 맵에 넣으면
+  // 같은 좌표계 / 스케일에서 바로 이어짐. 포즈: 실패 구간 회전은 2D-2D (정확), 위치는 직전 속도로 외삽
+  const FrameObs& o = obs[k];
+  if (!prm.recover || da3_ref <= 0 || o.depth.empty()) return {};
+  int f = failed_at - 1;  // 마지막으로 포즈가 있는 프레임 (그 앞 프레임도 있어야 속도)
+  if (f < 1 || !has_pose[f] || !has_pose[f - 1]) return {};
+  int nd = 0;
+  for (float d : o.depth) nd += std::isfinite(d);
+  if (nd < prm.init_min_points) return {};
+  const Vec3 v = center(poses[f]) - center(poses[f - 1]);
+  std::vector<int> done;
+  for (int g = f + 1; g <= k; ++g) {
+    const auto it = rel.find(g);
+    const Mat3 R = orthonormalize(it != rel.end() ? Mat3(it->second.R * poses[g - 1].R) : poses[g - 1].R);
+    poses[g] = Pose{R, -R * (center(poses[g - 1]) + v)}, has_pose[g] = 1, done.push_back(g);
+  }
+  // 보이는 맵 점 / 라인은 외삽 포즈와 안 맞을 수 있음 -> 점은 DA3 깊이로 바꾸고 (시차가 생기면 삼각측량이 대신), 라인은 다시 만들게 지움
+  const Pose& P = poses[k];
+  for (size_t i = 0; i < o.depth.size(); ++i)
+    if (std::isfinite(o.depth[i])) {
+      const int j = o.pid[i];
+      map_p[j] = P.R.transpose() * (da3_ref * double(o.depth[i]) * (cam.Kinv * Vec3(o.uv[i](0), o.uv[i](1), 1.0)) - P.t);
+      mature_p.erase(j), da3_p.insert(j);
+    }
+  for (int j : o.lid) map_l.erase(j), mature_l.erase(j);
+  kfs.push_back(k);
+  failed_at = -1, fail_reason.clear(), ++n_recovered;
+  return done;
 }
 
 void VOTracker::reset_init() {
