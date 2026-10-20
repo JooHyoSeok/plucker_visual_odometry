@@ -655,6 +655,9 @@ KFState LoopCloser::snapshot(int kf) const {  // map lock 아래에서
   if (vo_.prm.da3_lines)
     for (size_t m = 0; m < o.lid.size(); ++m)
       if (!vo_.mature_l.count(o.lid[m])) st.new_seg.push_back(o.seg[m]), st.new_lid.push_back(o.lid[m]);
+  if (vo_.prm.ba_lines && vo_.prm.ba_line_depth_sigma > 0)
+    for (size_t m = 0; m < o.lid.size(); ++m)
+      if (vo_.map_l.count(o.lid[m])) st.map_seg.push_back(o.seg[m]), st.map_lid.push_back(o.lid[m]);
   return st;
 }
 
@@ -733,10 +736,21 @@ void LoopCloser::process(int kf, const cv::Mat& img, bool depth) {
         std::vector<std::pair<int, float>> d;
         for (size_t m = 0; m < z.size(); ++m)
           if (z[m] > 0) d.emplace_back(st.pid[m * st.pid.size() / z.size()], float(z[m]));
+        std::vector<VOTracker::LineDepth> ld;  // 라인 끝점 (안쪽 10 %: 끝점은 가림 경계일 때가 많음) DA3 깊이, 같은 깊이맵
+        if (!st.map_seg.empty()) {
+          std::vector<Vec2> uv;
+          for (const Vec4& g : st.map_seg)
+            uv.push_back(g.head<2>() + 0.1 * (g.tail<2>() - g.head<2>())), uv.push_back(g.head<2>() + 0.9 * (g.tail<2>() - g.head<2>()));
+          const std::vector<double> zl = server_depth_kf(*anchor_, kf, uv);
+          for (size_t m = 0; m < st.map_seg.size() && 2 * m + 1 < zl.size(); ++m)
+            if (zl[2 * m] > 0 || zl[2 * m + 1] > 0)
+              ld.push_back({st.map_lid[m], uv[2 * m], uv[2 * m + 1], float(zl[2 * m]), float(zl[2 * m + 1])});
+        }
         auto l = take_map();
         const auto tb = Clock::now();
         vo_.da3[kf] = std::move(d);
         vo_.da3_ref = a_ref_;
+        if (!ld.empty()) vo_.da3_lines[kf] = std::move(ld);
         if (prm_.da3_adaptive && da3_sig_p_ > 0) vo_.da3_sigma = std::max(vo_.prm.ba_depth_sigma, 2.5 * da3_sig_p_);
         blocked(ms_since(tb));
       }

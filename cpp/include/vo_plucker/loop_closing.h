@@ -75,6 +75,8 @@ struct KFState {
   std::vector<char> mature;   // uvd 와 같은 순서: 성숙한 맵 점인지 (DA3 잡음 추정용)
   std::vector<Vec4> new_seg;  // (--da3-lines) 아직 성숙한 맵 라인이 없는 선분 / id -> DA3 깊이로 Plücker 라인
   std::vector<int> new_lid;
+  std::vector<Vec4> map_seg;  // (ba_line_depth_sigma) 맵 라인이 있는 선분 전부 / id -> 끝점 DA3 깊이 (BA prior)
+  std::vector<int> map_lid;
 };
 
 class LoopVerifier {

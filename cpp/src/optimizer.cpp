@@ -56,6 +56,28 @@ class EdgeLogDepth : public g2o::BaseBinaryEdge<1, double, g2o::VertexPointXYZ, 
   bool read(std::istream&) override { return false; }
   bool write(std::ostream&) const override { return false; }
 };
+
+// 라인 끝점 DA3 깊이 prior: 끝점 픽셀의 광선 lambda r (r = K^-1 [u v 1], z = 1) 이 3D 라인과 가장 가까운 점의 깊이 lambda,
+// error = log lambda - log(da3_ref z_DA3). 라인 p0 + s d (p0 = d x m / |d|^2, 카메라 좌표) 와 광선의 최근접점:
+// lambda = (c e - b f) / (a c - b^2), a = r.r, b = r.d, c = d.d, e = r.p0, f = d.p0. 수치 Jacobian (g2o 기본)
+class EdgeLineDepth : public g2o::BaseBinaryEdge<1, double, VertexLineOrth, g2o::VertexSE3Expmap> {
+ public:
+  Vec3 ray = Vec3::UnitZ();
+  void computeError() override {
+    const LineOrth& o = static_cast<const VertexLineOrth*>(_vertices[0])->estimate();
+    const g2o::SE3Quat& T = static_cast<const g2o::VertexSE3Expmap*>(_vertices[1])->estimate();
+    const Mat3 R = T.rotation().toRotationMatrix();
+    const Vec3 dc = R * (std::sin(o.phi) * o.U.col(1));
+    const Vec3 mc = R * (std::cos(o.phi) * o.U.col(0)) + T.translation().cross(dc);
+    const Vec3 p0 = dc.cross(mc) / dc.squaredNorm();
+    const double a = ray.dot(ray), b = ray.dot(dc), c = dc.dot(dc), e = ray.dot(p0), f = dc.dot(p0);
+    const double den = a * c - b * b;  // 광선과 라인이 나란하면 0
+    const double lam = den > 1e-9 * a * c ? (c * e - b * f) / den : 0;
+    _error[0] = std::log(std::max(lam, 1e-6)) - _measurement;
+  }
+  bool read(std::istream&) override { return false; }
+  bool write(std::ostream&) const override { return false; }
+};
 }  // namespace
 
 Pose hybrid_ba(const Camera& c, const Pose& init, const MapObs& m, const Pose& prev,
@@ -194,6 +216,7 @@ struct LocalBAProblem {
   std::vector<Obs> edges;
   std::vector<LObs> ledges;
   std::vector<std::pair<EdgeLogDepth*, int>> dedges;  // DA3 깊이 prior (엣지, 점 id)
+  std::vector<std::pair<EdgeLineDepth*, int>> ldedges;  // 라인 끝점 DA3 깊이 prior (엣지, 라인 id)
   std::unordered_map<int, g2o::VertexPointXYZ*> vp;
   std::unordered_map<int, VertexLineOrth*> vl;
   LocalBAStats st;
@@ -306,6 +329,13 @@ LocalBAPtr local_ba_build(const VOTracker& vo, int window, int max_fixed, bool l
     for (int f : free)
       for (int j : vo.obs[f].lid)
         if (vo.map_l.count(j)) ls.insert(j);
+    // 라인 끝점 DA3 깊이 (창 + 고정 키프레임): 키프레임 -> (라인 id -> 끝점 깊이)
+    const bool lprior = vo.prm.ba_line_depth_sigma > 0 && vo.da3_ref > 0;
+    std::unordered_map<int, std::unordered_map<int, const VOTracker::LineDepth*>> ldep;
+    if (lprior)
+      for (auto& [f, v] : vk)
+        if (const auto it = vo.da3_lines.find(f); it != vo.da3_lines.end())
+          for (const auto& d : it->second) ldep[f][d.lid] = &d;
     for (int j : ls) {
       std::vector<std::pair<int, const Vec4*>> seen;
       for (auto& [f, v] : vk)
@@ -313,8 +343,12 @@ LocalBAPtr local_ba_build(const VOTracker& vo, int window, int max_fixed, bool l
       if (seen.size() < 2) continue;
       // 퇴화 라인 제외: 창 안 첫 / 마지막 관측의 역투영 평면 각도가 작으면 (진행 방향을 향하는 라인 등)
       // 라인 위치가 거의 안 정해져서 포즈 회전을 끌고 감 (06: 라인 BA 만 켜면 마지막 방향 오차 1.3 -> 21 deg)
+      // 단, 끝점 DA3 깊이 prior 가 있으면 넣음 (prior 가 광선 방향 위치를 묶음: 진행 방향 라인도 BA 로)
+      bool has_depth = false;
+      for (auto& [f, sg] : seen) has_depth = has_depth || (ldep.count(f) && ldep[f].count(j));
       const auto [fa, fb] = std::minmax_element(seen.begin(), seen.end());
-      if (plane_angle_deg(vo.cam, vo.poses[fa->first], *fa->second, vo.poses[fb->first], *fb->second) < vo.prm.mature_deg)
+      if (!has_depth &&
+          plane_angle_deg(vo.cam, vo.poses[fa->first], *fa->second, vo.poses[fb->first], *fb->second) < vo.prm.mature_deg)
         continue;
       auto* l = new VertexLineOrth();
       l->setId(next_id++);
@@ -334,6 +368,25 @@ LocalBAPtr local_ba_build(const VOTracker& vo, int window, int max_fixed, bool l
         e->KL = vo.cam.KL;
         opt.addEdge(e);
         P->ledges.push_back({e, j, f});
+        if (const auto it = ldep.find(f); it != ldep.end())
+          if (const auto d = it->second.find(j); d != it->second.end())
+            for (int k = 0; k < 2; ++k) {
+              const double z = k ? d->second->z1 : d->second->z0;
+              if (!(z > 0)) continue;
+              const Vec2& u = k ? d->second->u1 : d->second->u0;
+              auto* ed = new EdgeLineDepth();
+              ed->setVertex(0, l);
+              ed->setVertex(1, vk[f]);
+              ed->ray = vo.cam.Kinv * Vec3(u(0), u(1), 1.0);
+              ed->setMeasurement(std::log(vo.da3_ref * z));
+              const double sg = vo.prm.ba_line_depth_sigma;
+              ed->setInformation(Eigen::Matrix<double, 1, 1>::Constant(1 / (sg * sg)));
+              auto* rk = new g2o::RobustKernelHuber();
+              rk->setDelta(std::sqrt(3.841));
+              ed->setRobustKernel(rk);
+              opt.addEdge(ed);
+              P->ldedges.emplace_back(ed, j);
+            }
       }
     }
   }
@@ -367,6 +420,11 @@ void local_ba_solve(LocalBAProblem& P) {
       if (o.e->level() == 0) live.insert(o.j);
     for (auto& [e, j] : P.dedges)
       if (!live.count(j)) e->setLevel(1);
+    std::unordered_set<int> llive;  // 라인도: 재투영 인라이어가 없으면 끝점 깊이 prior 도 빼기
+    for (auto& o : P.ledges)
+      if (o.e->level() == 0) llive.insert(o.j);
+    for (auto& [e, j] : P.ldedges)
+      if (!llive.count(j)) e->setLevel(1);
   }
   {  // BA 전 오차: 같은 (인라이어) 관측을 build 때 포즈/점으로 계산하고 1차 결과로 되돌림
     std::unordered_map<int, g2o::SE3Quat> pk;

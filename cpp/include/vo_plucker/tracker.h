@@ -89,6 +89,7 @@ struct TrackerParams {
   bool da3_points = false;    // 키프레임에서 시차가 작은 트랙을 DA3 깊이로 맵 점 (pseudo RGB-D), 시차 mature_deg 넘으면 삼각측량으로
   double ba_depth_sigma = 0;  // local BA 에 DA3 점 깊이 prior (log 깊이 표준편차, 0 = 끔. --depth-prior da3 의 앵커 깊이 사용)
   bool ba_drop_obs = false;   // local BA 이상치: 안 맞는 관측만 빼고 (ORB-SLAM), 좋은 관측이 2개 미만인 점만 맵에서 제거
+  double ba_line_depth_sigma = 0;  // (ba_lines) 라인 끝점 DA3 log-depth prior σ (0 = 끔): 광선 방향 위치 / 진행 방향 라인을 묶음
   bool recover = false;       // 추적 실패 다음 프레임: 외삽 포즈 + DA3 깊이 (da3_ref 로 VO 단위) 트랙 점 -> 같은 좌표계 / 스케일로 계속
   bool keyframes = false;     // 매핑과 상관없이 키프레임 목록 유지 (루프 클로저용)
 };
@@ -129,6 +130,9 @@ class VOTracker {
   std::unordered_set<int> da3_p, da3_l;  // (--da3-points) DA3 깊이로 만든 맵 점: 삼각측량은 시차가 mature_deg 를 넘을 때만 바꿈
   std::unordered_set<long long> bad_obs;  // (ba_drop_obs) BA 가 뺀 점 관측 obs_key(프레임, 점 id): 그 뒤 BA / 삼각측량에서 안 씀
   std::unordered_set<long long> bad_lobs;  // 같은 것, 라인 관측 obs_key(프레임, 라인 id)
+  // (ba_line_depth_sigma) 키프레임 -> 맵 라인 선분 끝점 (안쪽 10 %) 의 DA3 깊이 [m] (0 = 없음), 루프 스레드가 앵커 때 기록
+  struct LineDepth { int lid; Vec2 u0, u1; float z0, z1; };
+  std::unordered_map<int, std::vector<LineDepth>> da3_lines;
   static long long obs_key(int f, int j) { return (long long)f << 32 | unsigned(j); }
   int n_still = 0;       // 정지로 판정한 프레임 수
   int n_map6dof = 0;     // parallax가 작아서 맵 기준 6-DoF로 추정한 프레임 수
