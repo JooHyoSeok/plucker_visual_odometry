@@ -18,8 +18,15 @@ Pose hybrid_ba(const Camera& c, const Pose& init, const MapObs& m, const Pose& p
                const std::vector<std::pair<Vec2, Vec2>>& tracks, double w_epi = 1.0, int iters = 10, double huber_px = 3.0,
                bool fix_rotation = false);
 
+// 구조 방향 (소실점, TrackerParams::ba_vp_sigma): 선분 s 끝점에서 (중점 - 소실점 h, 동차 픽셀) 직선까지 거리 [px]
+double vp_dist(const Vec4& s, const Vec3& h);
+// 키프레임 선분 -> 구조 방향 번호 배정 (R = R_cw), 남은 선분에서 RANSAC 으로 새 방향을 dirs 에 추가. 반환 (선분 번호, 방향 번호)
+std::vector<std::pair<int, int>> assign_dirs(const Camera& c, const std::vector<Vec4>& seg, const Mat3& R,
+                                             std::vector<Vec3>& dirs, unsigned seed);
+
 struct LocalBAStats {
   int kfs = 0, fixed = 0, points = 0, edges = 0, outliers = 0, lines = 0, line_outliers = 0, depth_priors = 0;
+  int vp_edges = 0, dirs = 0;  // (ba_vp_sigma) 구조 방향 엣지 수, apply 뒤 방향 수
   double ms = 0;
   double rms_before = 0, rms_after = 0;  // 인라이어 관측의 재투영 오차 RMS [px], BA 전 / 후
   bool discarded = false;                 // (스레드) BA 하는 동안 루프 보정이 들어와서 결과를 버림

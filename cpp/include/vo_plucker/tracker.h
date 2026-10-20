@@ -91,6 +91,7 @@ struct TrackerParams {
   bool ba_drop_obs = false;   // local BA 이상치: 안 맞는 관측만 빼고 (ORB-SLAM), 좋은 관측이 2개 미만인 점만 맵에서 제거
   double ba_line_depth_sigma = 0;  // (ba_lines) 라인 끝점 DA3 log-depth prior σ (0 = 끔): 광선 방향 위치 / 진행 방향 라인을 묶음
   bool ba_line_nowrite = false;  // (ba_lines) 실험: BA 라인은 포즈만 제약하고 맵 라인에는 안 써넣음 (이상치 라인 삭제만)
+  double ba_vp_sigma = 0;     // local BA 에 구조 방향 (소실점) 제약 [px] (0 = 끔): 선분이 세계 방향 vo.dirs 와 나란하게 -> 회전 드리프트
   bool recover = false;       // 추적 실패 다음 프레임: 외삽 포즈 + DA3 깊이 (da3_ref 로 VO 단위) 트랙 점 -> 같은 좌표계 / 스케일로 계속
   bool keyframes = false;     // 매핑과 상관없이 키프레임 목록 유지 (루프 클로저용)
 };
@@ -134,6 +135,9 @@ class VOTracker {
   // (ba_line_depth_sigma) 키프레임 -> 맵 라인 선분 끝점 (안쪽 10 %) 의 DA3 깊이 [m] (0 = 없음), 루프 스레드가 앵커 때 기록
   struct LineDepth { int lid; Vec2 u0, u1; float z0, z1; };
   std::unordered_map<int, std::vector<LineDepth>> da3_lines;
+  // (ba_vp_sigma) 구조 방향 = 나란한 선분 묶음의 세계 단위 방향 (소실점), 키프레임 -> (선분 번호 obs[f].seg, 방향 번호)
+  std::vector<Vec3> dirs;
+  std::unordered_map<int, std::vector<std::pair<int, int>>> dir_obs;
   static long long obs_key(int f, int j) { return (long long)f << 32 | unsigned(j); }
   int n_still = 0;       // 정지로 판정한 프레임 수
   int n_map6dof = 0;     // parallax가 작아서 맵 기준 6-DoF로 추정한 프레임 수
@@ -142,7 +146,7 @@ class VOTracker {
   long n_depth_pts = 0;  // 깊이로 만든 맵 점 수
   int n_ba = 0;          // local BA 실행 수
   double ba_ms = 0;      // local BA 누적 시간
-  long ba_points = 0, ba_outliers = 0, ba_lines_used = 0, ba_line_outliers = 0, ba_depth_priors = 0;
+  long ba_points = 0, ba_outliers = 0, ba_lines_used = 0, ba_line_outliers = 0, ba_depth_priors = 0, ba_vp_edges = 0;
   double ba_rms_before = 0, ba_rms_after = 0;  // 누적 (실행 수로 나누면 평균)
   int failed_at = -1;  // tracking 실패 프레임 (-1 = 정상), 실패 후에는 추적 안 함 (prm.recover 면 다음 프레임에 DA3 깊이로 복구)
   std::string fail_reason;

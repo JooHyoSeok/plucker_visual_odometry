@@ -69,7 +69,7 @@ void LocalMapper::run() {
       continue;
     }
     ++n_ba, points += st.points, outliers += st.outliers, lines_used += st.lines, line_outliers += st.line_outliers;
-    depth_priors += st.depth_priors;
+    depth_priors += st.depth_priors, vp_edges += st.vp_edges;
     rms_before += st.rms_before, rms_after += st.rms_after;
   }
 }

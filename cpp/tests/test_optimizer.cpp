@@ -173,4 +173,53 @@ static bool line_edge_check() {
   return ok;
 }
 
-int main() { return trial_set(0.0) && trial_set(0.1) && hybrid_check() && line_edge_check() ? 0 : 1; }
+// 구조 방향: 세 방향 (Manhattan) 의 3D 선분을 투영 (0.5 px 잡음 + 무작위 선분 30 %) -> assign_dirs 가 첫 호출에 2 개,
+// 두 번째 호출 (같은 키프레임) 에 나머지 1 개를 만들고 (참 방향과 0.5° 안), 배정된 선분이 맞는 방향인지 (BA 가 Huber / chi2 로 거름)
+static bool vp_check() {
+  const Camera cam(707.0912, 707.0912, 601.8873, 183.1104, 1226, 370);
+  std::mt19937 rng(1);
+  std::normal_distribution<double> n01(0, 1);
+  std::uniform_real_distribution<double> uni(0, 1);
+  const Mat3 Rw = so3_exp(Vec3(0.3, -0.5, 0.2));  // 세계 Manhattan 축
+  const Mat3 R = so3_exp(Vec3(0.05, 0.4, -0.03)) * Rw.transpose();  // R_cw: 카메라에서 축이 비스듬히 보이게
+  std::vector<Vec4> seg;
+  std::vector<int> truth;  // 선분의 참 방향 (-1 = 무작위)
+  while (seg.size() < 300) {
+    const int k = uni(rng) < 0.3 ? -1 : int(uni(rng) * 3);
+    const Vec3 X((uni(rng) - 0.5) * 30, (uni(rng) - 0.5) * 8, 4 + uni(rng) * 30);  // 카메라 좌표
+    const Vec3 d = k < 0 ? Vec3(n01(rng), n01(rng), n01(rng)).normalized() : Vec3(R * Rw.col(k));
+    const Vec3 a = cam.K * X, b = cam.K * (X + d * (1 + 3 * uni(rng)));
+    if (a(2) <= 0 || b(2) <= 0) continue;
+    Vec4 s;
+    s << a.head<2>() / a(2), b.head<2>() / b(2);
+    if (std::hypot(s(2) - s(0), s(3) - s(1)) < 40 || s.minCoeff() < 0 || s(0) > cam.W || s(2) > cam.W || s(1) > cam.H ||
+        s(3) > cam.H)
+      continue;
+    for (int i = 0; i < 4; ++i) s(i) += 0.5 * n01(rng);
+    seg.push_back(s), truth.push_back(k);
+  }
+  std::vector<Vec3> dirs;
+  const size_t n1 = assign_dirs(cam, seg, R, dirs, 0).size(), d1 = dirs.size();
+  const auto a = assign_dirs(cam, seg, R, dirs, 1);
+  double worst = 0;
+  for (const Vec3& v : dirs) {
+    double best = 180;
+    for (int k = 0; k < 3; ++k) best = std::min(best, std::acos(std::min(1.0, std::abs(v.dot(Rw.col(k))))) * 180 / M_PI);
+    worst = std::max(worst, best);
+  }
+  int wrong = 0, structural = 0;
+  for (const auto& [i, j] : a) {
+    if (truth[i] < 0) continue;
+    ++structural;
+    wrong += std::acos(std::min(1.0, std::abs(dirs[j].dot(Rw.col(truth[i]))))) > 0.02;
+  }
+  std::printf("structural directions: first call %zu dirs (%zu segments), second %zu dirs, %zu assigned (%d structural, %d wrong), "
+              "worst direction error %.2f deg, vp_dist at true VP %.2e px\n",
+              d1, n1, dirs.size(), a.size(), structural, wrong, worst,
+              std::abs(vp_dist(Vec4(100, 100, 200, 150), Vec3(300, 200, 1))));
+  const bool ok = d1 == 2 && dirs.size() == 3 && worst < 0.5 && wrong * 50 <= structural && structural > 150;  // 짧은 선분 잡음 오배정 2 % 까지
+  std::printf("  %s\n", ok ? "OK: directions found and segments assigned" : "FAIL");
+  return ok;
+}
+
+int main() { return trial_set(0.0) && trial_set(0.1) && hybrid_check() && line_edge_check() && vp_check() ? 0 : 1; }

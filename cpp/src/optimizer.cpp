@@ -15,8 +15,12 @@
 #include <g2o/types/sba/vertex_se3_expmap.h>
 #include <g2o/types/slam3d/vertex_pointxyz.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <random>
+#include <map>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -80,6 +84,110 @@ class EdgeLineDepth : public g2o::BaseBinaryEdge<1, double, VertexLineOrth, g2o:
   bool write(std::ostream&) const override { return false; }
 };
 }  // namespace
+
+// 구조 방향 (소실점) 제약: 선분 끝점에서 (선분 중점 - 소실점 h) 직선까지 거리 [px] (중점을 지나니 두 끝점은 크기 같고 부호 반대)
+double vp_dist(const Vec4& s, const Vec3& h) {
+  const Vec3 m(0.5 * (s(0) + s(2)), 0.5 * (s(1) + s(3)), 1.0);
+  const Vec3 l = m.cross(h);
+  const double n = std::hypot(l(0), l(1));
+  return n > 1e-12 ? (l(0) * s(0) + l(1) * s(1) + l(2)) / n : 0.0;
+}
+// 선분과 (중점 - 소실점) 직선 사이 각 [rad]. 유한 소실점이 중점에서 선분 길이 안이면 판정 불가 -> pi/2
+static double vp_angle(const Vec4& s, const Vec3& h) {
+  const double L = std::hypot(s(2) - s(0), s(3) - s(1));
+  if (std::abs(h(2)) > 1e-9 &&
+      (h.head<2>() / h(2) - Vec2(0.5 * (s(0) + s(2)), 0.5 * (s(1) + s(3)))).norm() < L)
+    return M_PI / 2;
+  return std::asin(std::min(1.0, 2 * std::abs(vp_dist(s, h)) / L));
+}
+static Vec3 seg_normal(const Camera& c, const Vec4& s) {  // 선분 역투영 평면 법선 (카메라 좌표, 단위)
+  return (c.Kinv * Vec3(s(0), s(1), 1.0)).cross(c.Kinv * Vec3(s(2), s(3), 1.0)).normalized();
+}
+// 키프레임 선분 -> 구조 방향 배정: 기존 방향 중 각도 1.5° 안이 하나뿐인 30 px 이상 선분. 남은 40 px 이상 선분에서
+// RANSAC 소실점 (두 선분 평면 법선의 외적, 인라이어 1°, 15 개 이상, 법선 최소 고유 벡터로 정제) 을 최대 2 개 새 방향으로
+// (기존 방향과 3° 이상 떨어진 것만). R = 키프레임 R_cw, dirs 에 새 방향 추가
+std::vector<std::pair<int, int>> assign_dirs(const Camera& c, const std::vector<Vec4>& seg, const Mat3& R,
+                                             std::vector<Vec3>& dirs, unsigned seed) {
+  constexpr double kAssign = 1.5 * M_PI / 180, kInlier = 1.0 * M_PI / 180, kNew = 3.0 * M_PI / 180;
+  constexpr double kMinLen = 30, kMinLenNew = 40;
+  constexpr int kMinInl = 15;
+  std::vector<std::pair<int, int>> out;
+  std::vector<int> rest;
+  std::vector<Vec3> h(dirs.size());
+  for (size_t j = 0; j < dirs.size(); ++j) h[j] = c.K * (R * dirs[j]);
+  for (int i = 0; i < int(seg.size()); ++i) {
+    const double L = std::hypot(seg[i](2) - seg[i](0), seg[i](3) - seg[i](1));
+    if (L < kMinLen) continue;
+    int best = -1, nb = 0;
+    for (size_t j = 0; j < h.size(); ++j)
+      if (vp_angle(seg[i], h[j]) < kAssign) best = j, ++nb;
+    if (nb == 1) out.emplace_back(i, best);
+    else if (nb == 0 && L >= kMinLenNew) rest.push_back(i);
+  }
+  std::mt19937 rng(seed);
+  for (int it = 0; it < 2 && int(rest.size()) >= kMinInl; ++it) {
+    std::vector<int> best;
+    for (int t = 0; t < 300; ++t) {
+      const int a = rest[rng() % rest.size()], b = rest[rng() % rest.size()];
+      const Vec3 d = seg_normal(c, seg[a]).cross(seg_normal(c, seg[b]));
+      if (a == b || d.norm() < 1e-9) continue;
+      const Vec3 hv = c.K * d;
+      std::vector<int> inl;
+      for (int i : rest)
+        if (vp_angle(seg[i], hv) < kInlier) inl.push_back(i);
+      if (inl.size() > best.size()) best.swap(inl);
+    }
+    if (int(best.size()) < kMinInl) break;
+    Mat3 S = Mat3::Zero();
+    for (int i : best) {
+      const Vec3 n = seg_normal(c, seg[i]);
+      S += n * n.transpose();
+    }
+    const Vec3 v = R.transpose() * Eigen::SelfAdjointEigenSolver<Mat3>(S).eigenvectors().col(0);
+    std::unordered_set<int> inl(best.begin(), best.end());
+    rest.erase(std::remove_if(rest.begin(), rest.end(), [&](int i) { return inl.count(i) > 0; }), rest.end());
+    bool near = false;
+    for (const Vec3& u : dirs) near = near || std::acos(std::min(1.0, std::abs(u.dot(v)))) < kNew;
+    if (near) continue;
+    dirs.push_back(v);
+    for (int i : best) out.emplace_back(i, int(dirs.size()) - 1);
+  }
+  return out;
+}
+
+namespace {
+// EdgeVP: 키프레임 T_cw 정점, 세계 방향 v 고정 (지난 관측 전체로 다시 추정 -> 긴 시간 회전 기준). Jacobian 은 g2o 기본 (수치 미분)
+class EdgeVP : public g2o::BaseUnaryEdge<1, double, g2o::VertexSE3Expmap> {
+ public:
+  Vec3 v;
+  Vec4 s;
+  Mat3 K;
+  void computeError() override {
+    const Mat3 R = static_cast<const g2o::VertexSE3Expmap*>(_vertices[0])->estimate().rotation().toRotationMatrix();
+    _error[0] = vp_dist(s, K * (R * v));
+  }
+  bool read(std::istream&) override { return false; }
+  bool write(std::ostream&) const override { return false; }
+};
+}  // namespace
+
+// 구조 방향을 관측 전체 (지금 포즈) 로 다시 추정: v = argmin sum (n^T R v)^2 = sum (R^T n)(R^T n)^T 의 최소 고유 벡터
+static void refine_dirs(VOTracker& vo) {
+  std::vector<Mat3> S(vo.dirs.size(), Mat3::Zero());
+  std::vector<int> cnt(vo.dirs.size(), 0);
+  for (const auto& [f, a] : vo.dir_obs) {
+    const Mat3 Rt = vo.poses[f].R.transpose();
+    for (const auto& [i, j] : a) {
+      const Vec3 n = Rt * seg_normal(vo.cam, vo.obs[f].seg[i]);
+      S[j] += n * n.transpose(), ++cnt[j];
+    }
+  }
+  for (size_t j = 0; j < S.size(); ++j)
+    if (cnt[j] >= 2) {
+      const Vec3 v = Eigen::SelfAdjointEigenSolver<Mat3>(S[j]).eigenvectors().col(0);
+      vo.dirs[j] = v.dot(vo.dirs[j]) < 0 ? Vec3(-v) : v;
+    }
+}
 
 Pose hybrid_ba(const Camera& c, const Pose& init, const MapObs& m, const Pose& prev,
                const std::vector<std::pair<Vec2, Vec2>>& tracks, double w_epi, int iters, double huber_px,
@@ -218,6 +326,10 @@ struct LocalBAProblem {
   std::vector<LObs> ledges;
   std::vector<std::pair<EdgeLogDepth*, int>> dedges;  // DA3 깊이 prior (엣지, 점 id)
   std::vector<std::pair<EdgeLineDepth*, int>> ldedges;  // 라인 끝점 DA3 깊이 prior (엣지, 라인 id)
+  struct VPObs { EdgeVP* e; int f, i; };
+  std::vector<VPObs> vpedges;  // 구조 방향 제약 (엣지, 키프레임, 선분 번호)
+  std::vector<Vec3> dirs;  // build 때 vo.dirs + 새 방향 (apply 에서 기록)
+  std::map<int, std::vector<std::pair<int, int>>> new_dir_obs;  // 배정이 없던 키프레임의 새 배정
   std::unordered_map<int, g2o::VertexPointXYZ*> vp;
   std::unordered_map<int, VertexLineOrth*> vl;
   std::unordered_map<int, Vec3> lc;  // 라인 좌표 원점 (첫 관측 키프레임 카메라 중심)
@@ -395,6 +507,32 @@ LocalBAPtr local_ba_build(const VOTracker& vo, int window, int max_fixed, bool l
       }
     }
   }
+  // 구조 방향 (소실점): 배정이 없는 키프레임 (새 키프레임) 은 지금 포즈로 배정 / 새 방향 (apply 에서 기록), 자유 키프레임의
+  // 배정마다 EdgeVP (방향 고정 -> 창 회전이 지난 구간 전체가 본 방향에 묶임)
+  if (vo.prm.ba_vp_sigma > 0) {
+    P->dirs = vo.dirs;
+    std::vector<int> all(free);
+    all.insert(all.end(), fixed.begin(), fixed.end());
+    std::sort(all.begin(), all.end());
+    for (int f : all)
+      if (!vo.dir_obs.count(f)) P->new_dir_obs[f] = assign_dirs(vo.cam, vo.obs[f].seg, vo.poses[f].R, P->dirs, f);
+    const double sg = vo.prm.ba_vp_sigma;
+    for (int f : free) {
+      const auto it = vo.dir_obs.find(f);
+      for (const auto& [i, j] : it != vo.dir_obs.end() ? it->second : P->new_dir_obs[f]) {
+        auto* e = new EdgeVP();
+        e->setVertex(0, vk[f]);
+        e->v = P->dirs[j], e->s = vo.obs[f].seg[i], e->K = vo.cam.K;
+        e->setInformation(Eigen::Matrix<double, 1, 1>::Constant(1 / (sg * sg)));
+        auto* rk = new g2o::RobustKernelHuber();
+        rk->setDelta(std::sqrt(3.841));
+        e->setRobustKernel(rk);
+        opt.addEdge(e);
+        P->vpedges.push_back({e, f, i});
+      }
+    }
+    P->st.vp_edges = P->vpedges.size();
+  }
   P->st.kfs = free.size(), P->st.fixed = fixed.size(), P->st.points = P->vp.size(), P->st.edges = P->edges.size();
   P->st.lines = P->vl.size();
   P->st.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -418,6 +556,9 @@ void local_ba_solve(LocalBAProblem& P) {
     else o.e->setRobustKernel(nullptr);
   for (auto& o : P.ledges)  // 라인도 같은 기준 (끝점 거리 2개 = 2 DoF)
     if (o.e->computeError(), o.e->chi2() > kBaChi2) o.e->setLevel(1);
+    else o.e->setRobustKernel(nullptr);
+  for (auto& o : P.vpedges)  // 구조 방향도 (1 DoF)
+    if (o.e->computeError(), o.e->chi2() > 3.841) o.e->setLevel(1);
     else o.e->setRobustKernel(nullptr);
   {  // 재투영 인라이어가 하나도 안 남은 점은 깊이 prior 도 빼기 (prior 만으로는 점 3-DoF 가 안 정해짐)
     std::unordered_set<int> live;
@@ -506,6 +647,20 @@ LocalBAStats local_ba_apply(VOTracker& vo, LocalBAProblem& P) {
     }
   }
   st.line_outliers = lbad.size();
+  if (vo.prm.ba_vp_sigma > 0) {  // 새 방향 / 배정 기록, 안 맞는 배정은 빼고, 방향을 관측 전체로 다시 추정
+    vo.dirs = P.dirs;
+    for (auto& [f, a] : P.new_dir_obs) vo.dir_obs[f] = a;
+    std::set<std::pair<int, int>> vbad;
+    for (auto& o : P.vpedges)
+      if (o.e->computeError(), o.e->chi2() > 3.841) vbad.emplace(o.f, o.i);
+    for (int f : P.free)
+      if (const auto it = vo.dir_obs.find(f); it != vo.dir_obs.end())
+        it->second.erase(std::remove_if(it->second.begin(), it->second.end(),
+                                        [&](const std::pair<int, int>& a) { return vbad.count({f, a.first}) > 0; }),
+                         it->second.end());
+    refine_dirs(vo);
+    st.dirs = vo.dirs.size();
+  }
   // 창 안 비키프레임 + BA 동안 트래킹한 프레임: 직전 (자유) 키프레임의 보정을 같이 (T_f <- T_f T_kf,old^-1 T_kf,new)
   const int k_last = int(vo.poses.size()) - 1;
   for (int f = P.free.front(); f <= k_last; ++f) {

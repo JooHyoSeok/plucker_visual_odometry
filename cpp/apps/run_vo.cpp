@@ -58,7 +58,7 @@ static bool flag(int argc, char** argv, const char* name) {
 // 인자 목록: 모르는 인자 (예전 실험 인자 포함) 는 에러 -> 조용히 기본값으로 도는 일이 없게
 static const char* kValueOpts[] = {"--video", "--gt", "--calib", "--traj", "--da3-cache", "--kf-out", "--realtime", "--start",
                                    "--stride", "--resize", "--traj-online", "--dump-map", "--snapshot", "--loop-pr", "--loop-ver",
-                                   "--loop-python", "--da3-range", "--da3-model", "--ba-line-prior", "--depth", "--depth-conf", "--depth-conf-min", "--depth-max",
+                                   "--loop-python", "--da3-range", "--da3-model", "--ba-line-prior", "--ba-vp", "--depth", "--depth-conf", "--depth-conf-min", "--depth-max",
                                    "--depth-scale"};
 static const char* kFlagOpts[] = {"--no-loop", "--no-da3", "--no-viewer", "--autostart", "--sync", "--no-lines", "--ba-lines", "--ba-line-nowrite"};
 
@@ -205,6 +205,7 @@ int main(int argc, char** argv) {
   prm.ba_lines = flag(argc, argv, "--ba-lines");  // 실험: local / 전역 BA 에 Plücker 라인 (orthonormal 4-DoF)
   prm.ba_line_depth_sigma = std::atof(arg(argc, argv, "--ba-line-prior", "0"));  // 실험: 라인 끝점 DA3 log-depth prior σ
   prm.ba_line_nowrite = flag(argc, argv, "--ba-line-nowrite");  // 실험: BA 라인을 맵에 안 써넣음 (포즈 제약만)
+  prm.ba_vp_sigma = std::atof(arg(argc, argv, "--ba-vp", "0"));  // 실험: local BA 구조 방향 (소실점) 제약 σ [px]
   const char* depth_pat = arg(argc, argv, "--depth", nullptr);  // iPhone LiDAR 같은 프레임별 metric depth 영상 (RGB-D 모드)
   const char* conf_pat = arg(argc, argv, "--depth-conf", nullptr);
   const int conf_min = std::atoi(arg(argc, argv, "--depth-conf-min", "2"));
@@ -547,6 +548,10 @@ int main(int argc, char** argv) {
   if (prm.local_ba && prm.ba_lines)
     std::printf("  local BA lines: %.0f lines/run, %.1f outlier lines removed/run\n",
                 double(vo.ba_lines_used) / std::max(vo.n_ba, 1), double(vo.ba_line_outliers) / std::max(vo.n_ba, 1));
+  if (prm.ba_vp_sigma > 0)
+    std::printf("  local BA structural directions: %.0f segment constraints/run, %zu directions (sigma %.1f px)\n",
+                double(mapper ? mapper->vp_edges : vo.ba_vp_edges) / std::max(mapper ? mapper->n_ba : vo.n_ba, 1),
+                vo.dirs.size(), prm.ba_vp_sigma);
   if (prm.ba_depth_sigma > 0)
     std::printf("  local BA DA3 depth priors: %.0f /run (sigma %.2f in log depth)\n",
                 double(mapper ? mapper->depth_priors : vo.ba_depth_priors) / std::max(mapper ? mapper->n_ba : vo.n_ba, 1),

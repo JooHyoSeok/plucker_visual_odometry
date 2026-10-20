@@ -384,7 +384,7 @@ bool VOTracker::track(int k) {
   if (kf && prm.local_ba) {
     const LocalBAStats s = vp::local_ba(*this, prm.ba_window, prm.ba_fixed, prm.ba_lines && prm.use_lines, prm.ba_mature_only);
     ++n_ba, ba_ms += s.ms, ba_points += s.points, ba_outliers += s.outliers;
-    ba_lines_used += s.lines, ba_line_outliers += s.line_outliers, ba_depth_priors += s.depth_priors;
+    ba_lines_used += s.lines, ba_line_outliers += s.line_outliers, ba_depth_priors += s.depth_priors, ba_vp_edges += s.vp_edges;
     ba_rms_before += s.rms_before, ba_rms_after += s.rms_after;
   }
   return true;
