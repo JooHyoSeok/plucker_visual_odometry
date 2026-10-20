@@ -104,8 +104,10 @@ Frontend::Frontend(const FrontendParams& prm) : prm(prm), lsd_(cv::createLineSeg
 FrameObs Frontend::step(const cv::Mat& g) {
   const auto t0 = std::chrono::steady_clock::now();
   std::vector<cv::Vec4f> raw;
-  if (fld_) fld_->detect(g, raw);
-  else lsd_->detect(g, raw);
+  if (prm.max_lines > 0) {  // max_lines 0 = 선분 안 씀 (run_vo --no-lines)
+    if (fld_) fld_->detect(g, raw);
+    else lsd_->detect(g, raw);
+  }
   lsd_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   std::vector<Vec4> det;
   std::vector<Vec2> det_dir, det_mid;

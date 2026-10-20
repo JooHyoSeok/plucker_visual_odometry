@@ -279,7 +279,8 @@ int main(int argc, char** argv) {
 #endif
   prm.keyframes = use_loop || use_anchor || ba_thread;
   prm.ba_depth_sigma = use_anchor ? 0.3 : 0;  // local BA 점 깊이 prior (log 깊이 σ, 앵커 깊이)
-  prm.da3_lines = use_anchor;                 // 키프레임 선분을 DA3 깊이로 바로 Plücker 라인 (진행 방향 라인 포함)
+  prm.da3_lines = use_anchor && prm.use_lines;  // 키프레임 선분을 DA3 깊이로 바로 Plücker 라인 (진행 방향 라인 포함)
+  if (!prm.use_lines) prm.ba_vp_sigma = 0;     // --no-lines: 선분을 아예 안 씀 (검출 / 추적 / 맵 / 구조 방향 모두)
   prm.recover = use_anchor;                   // 추적 실패 다음 프레임: 외삽 포즈 + DA3 깊이 트랙 점으로 같은 좌표계 / 스케일에서 계속
   prm.depth_init = use_anchor;                // 2-view 초기화가 계속 안 되면 한 프레임을 DA3 깊이로 초기화 (아래 프레임 루프)
   lprm.shortlist = std::atoi(arg(argc, argv, "--loop-shortlist", loop_ver == "orb" ? "15" : "3"));  // MASt3R는 쌍당 비쌈
@@ -287,6 +288,7 @@ int main(int argc, char** argv) {
   const double loop_min_sim = std::atof(arg(argc, argv, "--loop-min-sim", loop_pr == "mast3r" ? "0.02" : "0.5"));
   FrontendParams fprm;
   fprm.reuse_every = 5;  // 맵 재사용: 5 프레임마다 ORB 투영 검색으로 옛 맵 점을 다시 붙임
+  if (!prm.use_lines) fprm.max_lines = fprm.min_lines = 0;
   Frontend front(fprm);
   VOTracker vo(cam, prm);
   std::unique_ptr<LoopCloser> loop;
