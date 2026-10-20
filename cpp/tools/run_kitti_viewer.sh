@@ -53,3 +53,5 @@ print(table)
 (out / "ate_table.md").write_text(table)
 print("saved", out / "ate_table.md")
 EOF
+# 논문식 색 표 (LaTeX -> PDF / PNG, 다른 방법들 숫자와 함께)
+"$PY" "$ROOT/cpp/tools/kitti_table_tex.py" "$OUT/kitti_table" "Monocular + DA3 metric depth (Calibrated)=$OUT" > /dev/null && echo "saved $OUT/kitti_table.png (+ .tex / .pdf)"

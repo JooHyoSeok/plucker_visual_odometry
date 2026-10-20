@@ -194,10 +194,15 @@ class Mast3r:
 # ---------------- metric depth anchor ----------------
 class Da3Depth:
     RES, ZMIN, ZMAX = 1008, 3.0, 40.0  # DA3 깊이 이 범위의 점만 (가까운 곳은 편향 크고 먼 곳은 VO 깊이가 부정확)
+    # nested: DA3NESTED-GIANT-LARGE (1.40B, 출력이 미터, CC BY-NC 4.0)
+    # metric: DA3METRIC-LARGE (0.35B, Apache 2.0): 미터 = 초점거리 [px, 네트워크가 본 해상도] x 출력 / 300
+    MODELS = {"nested": "depth-anything/DA3NESTED-GIANT-LARGE", "metric": "depth-anything/DA3METRIC-LARGE"}
 
-    def __init__(self, device, cache=None):
+    def __init__(self, device, cache=None, model="nested", focal=0.0):
         # cache: 디렉터리면 영상 해시별 깊이 맵 (fp16) 을 저장 / 재사용 -> 실행끼리 결정적 + 캐시가 차면 GPU 안 씀 (모델은 처음 놓칠 때 로드)
+        # focal: (metric) 입력 영상의 초점거리 [px]
         self.device, self.cache, self.net = device, Path(cache) if cache else None, None
+        self.model, self.focal = model, focal
         if self.cache:
             self.cache.mkdir(parents=True, exist_ok=True)
         else:
@@ -206,21 +211,25 @@ class Da3Depth:
     def load(self):
         sys.path.insert(0, str(DA3_REPO / "src"))
         from depth_anything_3.api import DepthAnything3
-        self.net = DepthAnything3.from_pretrained("depth-anything/DA3NESTED-GIANT-LARGE").to(self.device).eval()
+        self.net = DepthAnything3.from_pretrained(self.MODELS[self.model]).to(self.device).eval()
         if self.cache:
             log("[loop_server] DA3 model loaded (depth cache miss)")
 
     @torch.no_grad()
     def depth_map(self, bgr):
-        f = self.cache / f"{hashlib.md5(bgr.tobytes()).hexdigest()}_{self.RES}.npy" if self.cache else None
+        tag = "" if self.model == "nested" else "_" + self.model  # 캐시에는 네트워크 출력 그대로 (모델별 파일)
+        f = self.cache / f"{hashlib.md5(bgr.tobytes()).hexdigest()}_{self.RES}{tag}.npy" if self.cache else None
         if f is not None and f.exists():
-            return np.load(f).astype(np.float32)
-        if self.net is None:
-            self.load()
-        d = self.net.inference([cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)], process_res=self.RES).depth[0]
-        if f is not None:
-            np.save(f, d.astype(np.float16))
-            d = d.astype(np.float16).astype(np.float32)  # 캐시를 쓴 실행과 똑같은 값
+            d = np.load(f).astype(np.float32)
+        else:
+            if self.net is None:
+                self.load()
+            d = self.net.inference([cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)], process_res=self.RES).depth[0]
+            if f is not None:
+                np.save(f, d.astype(np.float16))
+                d = d.astype(np.float16).astype(np.float32)  # 캐시를 쓴 실행과 똑같은 값
+        if self.model == "metric":  # 네트워크가 본 해상도의 초점거리로 미터
+            d = d * (self.focal * d.shape[1] / bgr.shape[1]) / 300.0
         return d
 
     def at(self, bgr, uv):  # DA3 metric depth [m] at pixels uv (n, 2). 깊이 맵은 sample() 용으로 남겨 둠
@@ -248,12 +257,14 @@ def main():
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--depth-cache", default="", help="directory for DA3 depth maps keyed by image hash (deterministic, GPU-free reruns)")
     ap.add_argument("--depth-range", default="3,40", help="DA3 depth used for anchors / priors / 3D [m] (indoor: 0.5,20)")
+    ap.add_argument("--depth-model", default="nested", choices=list(Da3Depth.MODELS))
+    ap.add_argument("--depth-focal", type=float, default=0.0, help="(metric model) focal length of the input images [px]")
     o = ap.parse_args()
     Da3Depth.ZMIN, Da3Depth.ZMAX = (float(x) for x in o.depth_range.split(","))
     m3r = Mast3r(o.device, retrieval=o.pr == "mast3r") if "mast3r" in (o.pr, o.ver) else None  # 검색/검증이 공유
     pr = {"none": None, "netvlad": NetVLAD, "salad": Salad, "mast3r": None}[o.pr]
     pr = pr(o.device) if pr else None
-    depth = Da3Depth(o.device, o.depth_cache or None) if o.depth == "da3" else None
+    depth = Da3Depth(o.device, o.depth_cache or None, o.depth_model, o.depth_focal) if o.depth == "da3" else None
     log(f"[loop_server] ready: pr={o.pr} ver={o.ver} depth={o.depth} device={o.device}")
     desc, last_img, depth_kf = {}, {}, -1
     for line in sys.stdin:

@@ -7,6 +7,7 @@
 //           --kf-out FILE --realtime HZ --start N --stride N --resize S --no-lines --traj-online FILE --dump-map FILE
 //           --snapshot FILE --loop-pr thumb|netvlad|salad|mast3r --loop-ver orb|mast3r|orb+mast3r --loop-python PY
 //           --da3-range MIN,MAX (기본: 첫 프레임 DA3 깊이로 실내 0.5,20 / 실외 3,40)
+//           --da3-model metric|nested (기본 DA3METRIC-LARGE 0.35B: NESTED-GIANT-LARGE 1.40B 보다 3.3 배 빠르고 KITTI 가 더 정확)
 //   --resize S : 영상과 intrinsic을 S배 (고해상도 입력용, 예: iPhone 1920x1440 -> 0.5)
 //   --stride N : N 프레임마다 하나만 사용 (고 fps / 느린 이동용). GT도 같은 간격으로 맞춤
 //   --start N  : 처음 N 프레임 건너뛰기 (예: 시작이 제자리 회전뿐인 핸드헬드 영상). GT도 N부터
@@ -57,7 +58,7 @@ static bool flag(int argc, char** argv, const char* name) {
 // 인자 목록: 모르는 인자 (예전 실험 인자 포함) 는 에러 -> 조용히 기본값으로 도는 일이 없게
 static const char* kValueOpts[] = {"--video", "--gt", "--calib", "--traj", "--da3-cache", "--kf-out", "--realtime", "--start",
                                    "--stride", "--resize", "--traj-online", "--dump-map", "--snapshot", "--loop-pr", "--loop-ver",
-                                   "--loop-python", "--da3-range", "--depth", "--depth-conf", "--depth-conf-min", "--depth-max",
+                                   "--loop-python", "--da3-range", "--da3-model", "--depth", "--depth-conf", "--depth-conf-min", "--depth-max",
                                    "--depth-scale"};
 static const char* kFlagOpts[] = {"--no-loop", "--no-da3", "--no-viewer", "--autostart", "--sync", "--no-lines"};
 
@@ -292,6 +293,8 @@ int main(int argc, char** argv) {
       srv = start_loop_server(std::string(arg(argc, argv, "--loop-python", VP_PYTHON)) + " " VP_LOOP_SERVER " --pr " +
                               (py_pr ? loop_pr : "none") + " --ver " + (py_ver ? "mast3r" : "none") +
                               (use_anchor ? " --depth da3 --depth-range " + std::to_string(zmin) + "," + std::to_string(zmax) +
+                                                " --depth-model " + arg(argc, argv, "--da3-model", "metric") +
+                                                " --depth-focal " + std::to_string((cam.fx + cam.fy) / 2) +
                                                 (arg(argc, argv, "--da3-cache", nullptr) ? std::string(" --depth-cache ") + arg(argc, argv, "--da3-cache", "") : "")
                                           : ""));
   }
