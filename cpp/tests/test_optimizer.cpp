@@ -113,7 +113,10 @@ static bool line_edge_check() {
   std::uniform_real_distribution<double> uni(0, 1);
   double worst_j = 0, worst_rt = 0, worst_res = 0;
   for (int it = 0; it < 200; ++it) {
-    const Pose T{so3_exp(Vec3(n01(rng), n01(rng), n01(rng)) * 0.3), Vec3(n01(rng), n01(rng), n01(rng)) * 2};
+    Pose T{so3_exp(Vec3(n01(rng), n01(rng), n01(rng)) * 0.3), Vec3(n01(rng), n01(rng), n01(rng)) * 2};
+    const bool far = it % 2;  // 홀수: 카메라가 세계 원점에서 멀리 (KITTI 처럼), 라인 원점 c = 카메라 중심 근처 (local BA 처럼)
+    const Vec3 Cf = Vec3(n01(rng), n01(rng), n01(rng)) * 300;
+    if (far) T.t = -T.R * Cf;
     const Vec3 pc((uni(rng) - 0.5) * 10, (uni(rng) - 0.5) * 4, 5 + uni(rng) * 25);  // 카메라 앞 점
     const Vec3 dc = Vec3(n01(rng), n01(rng), n01(rng) * 0.3).normalized();
     const Vec3 pw = T.R.transpose() * (pc - T.t), dw = T.R.transpose() * dc;
@@ -125,14 +128,16 @@ static bool line_edge_check() {
     const Line L2 = from_orth(to_orth(L));  // 왕복: 방향 부호까지 같아야 (d.m = 0, |d| = 1)
     worst_rt = std::max(worst_rt, (L2 - L).cwiseAbs().maxCoeff());
 
+    const Vec3 c = far ? Vec3(Cf + Vec3(n01(rng), n01(rng), n01(rng)) * 2) : Vec3::Zero();
+    worst_rt = std::max(worst_rt, (shift_line(shift_line(L, c), -c) - L).cwiseAbs().maxCoeff());
     auto* vl = new VertexLineOrth();
-    vl->setEstimate(to_orth(L));
+    vl->setEstimate(to_orth(shift_line(L, c)));
     auto* vp = new g2o::VertexSE3Expmap();
     vp->setEstimate(g2o::SE3Quat(T.R, T.t));
     EdgeLineProjection e;
     e.setVertex(0, vl), e.setVertex(1, vp);
     e.setMeasurement(seg);
-    e.KL = cam.KL;
+    e.KL = cam.KL, e.c = c;
     e.computeError();
     MapObs mo;
     mo.L.push_back(L), mo.seg.push_back(seg);

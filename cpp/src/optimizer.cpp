@@ -59,20 +59,21 @@ class EdgeLogDepth : public g2o::BaseBinaryEdge<1, double, g2o::VertexPointXYZ, 
 
 // 라인 끝점 DA3 깊이 prior: 끝점 픽셀의 광선 lambda r (r = K^-1 [u v 1], z = 1) 이 3D 라인과 가장 가까운 점의 깊이 lambda,
 // error = log lambda - log(da3_ref z_DA3). 라인 p0 + s d (p0 = d x m / |d|^2, 카메라 좌표) 와 광선의 최근접점:
-// lambda = (c e - b f) / (a c - b^2), a = r.r, b = r.d, c = d.d, e = r.p0, f = d.p0. 수치 Jacobian (g2o 기본)
+// lambda = (cc e - b f) / (a cc - b^2), a = r.r, b = r.d, cc = d.d, e = r.p0, f = d.p0. 수치 Jacobian (g2o 기본)
 class EdgeLineDepth : public g2o::BaseBinaryEdge<1, double, VertexLineOrth, g2o::VertexSE3Expmap> {
  public:
   Vec3 ray = Vec3::UnitZ();
+  Vec3 c = Vec3::Zero();  // 라인 좌표 원점 (EdgeLineProjection::c 와 같음)
   void computeError() override {
     const LineOrth& o = static_cast<const VertexLineOrth*>(_vertices[0])->estimate();
     const g2o::SE3Quat& T = static_cast<const g2o::VertexSE3Expmap*>(_vertices[1])->estimate();
     const Mat3 R = T.rotation().toRotationMatrix();
     const Vec3 dc = R * (std::sin(o.phi) * o.U.col(1));
-    const Vec3 mc = R * (std::cos(o.phi) * o.U.col(0)) + T.translation().cross(dc);
+    const Vec3 mc = R * (std::cos(o.phi) * o.U.col(0)) + (R * c + T.translation()).cross(dc);
     const Vec3 p0 = dc.cross(mc) / dc.squaredNorm();
-    const double a = ray.dot(ray), b = ray.dot(dc), c = dc.dot(dc), e = ray.dot(p0), f = dc.dot(p0);
-    const double den = a * c - b * b;  // 광선과 라인이 나란하면 0
-    const double lam = den > 1e-9 * a * c ? (c * e - b * f) / den : 0;
+    const double a = ray.dot(ray), b = ray.dot(dc), cc = dc.dot(dc), e = ray.dot(p0), f = dc.dot(p0);
+    const double den = a * cc - b * b;  // 광선과 라인이 나란하면 0
+    const double lam = den > 1e-9 * a * cc ? (cc * e - b * f) / den : 0;
     _error[0] = std::log(std::max(lam, 1e-6)) - _measurement;
   }
   bool read(std::istream&) override { return false; }
@@ -219,6 +220,7 @@ struct LocalBAProblem {
   std::vector<std::pair<EdgeLineDepth*, int>> ldedges;  // 라인 끝점 DA3 깊이 prior (엣지, 라인 id)
   std::unordered_map<int, g2o::VertexPointXYZ*> vp;
   std::unordered_map<int, VertexLineOrth*> vl;
+  std::unordered_map<int, Vec3> lc;  // 라인 좌표 원점 (첫 관측 키프레임 카메라 중심)
   LocalBAStats st;
   int version = 0;  // build 때 vo.map_version (루프 보정이 들어오면 apply 에서 버림)
 };
@@ -350,9 +352,12 @@ LocalBAPtr local_ba_build(const VOTracker& vo, int window, int max_fixed, bool l
       if (!has_depth &&
           plane_angle_deg(vo.cam, vo.poses[fa->first], *fa->second, vo.poses[fb->first], *fb->second) < vo.prm.mature_deg)
         continue;
+      const Pose& Pc = vo.poses[seen.front().first];
+      const Vec3 c = -Pc.R.transpose() * Pc.t;
+      P->lc[j] = c;
       auto* l = new VertexLineOrth();
       l->setId(next_id++);
-      l->setEstimate(to_orth(vo.map_l.at(j)));
+      l->setEstimate(to_orth(shift_line(vo.map_l.at(j), c)));
       l->setMarginalized(true);
       opt.addVertex(l);
       P->vl[j] = l;
@@ -365,7 +370,7 @@ LocalBAPtr local_ba_build(const VOTracker& vo, int window, int max_fixed, bool l
         auto* rk = new g2o::RobustKernelHuber();
         rk->setDelta(huber);
         e->setRobustKernel(rk);
-        e->KL = vo.cam.KL;
+        e->KL = vo.cam.KL, e->c = c;
         opt.addEdge(e);
         P->ledges.push_back({e, j, f});
         if (const auto it = ldep.find(f); it != ldep.end())
@@ -377,7 +382,7 @@ LocalBAPtr local_ba_build(const VOTracker& vo, int window, int max_fixed, bool l
               auto* ed = new EdgeLineDepth();
               ed->setVertex(0, l);
               ed->setVertex(1, vk[f]);
-              ed->ray = vo.cam.Kinv * Vec3(u(0), u(1), 1.0);
+              ed->ray = vo.cam.Kinv * Vec3(u(0), u(1), 1.0), ed->c = c;
               ed->setMeasurement(std::log(vo.da3_ref * z));
               const double sg = vo.prm.ba_line_depth_sigma;
               ed->setInformation(Eigen::Matrix<double, 1, 1>::Constant(1 / (sg * sg)));
@@ -495,8 +500,8 @@ LocalBAStats local_ba_apply(VOTracker& vo, LocalBAProblem& P) {
     if (!vo.map_l.count(j)) continue;
     if (lbad.count(j)) {
       vo.map_l.erase(j), vo.mature_l.erase(j);
-    } else {
-      vo.map_l[j] = from_orth(l->estimate());
+    } else if (!vo.prm.ba_line_nowrite) {
+      vo.map_l[j] = shift_line(from_orth(l->estimate()), -P.lc.at(j));
       vo.mature_l.insert(j);  // BA 가 맡은 라인: 재삼각측량에서 제외
     }
   }

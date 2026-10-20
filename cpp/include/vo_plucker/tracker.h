@@ -90,6 +90,7 @@ struct TrackerParams {
   double ba_depth_sigma = 0;  // local BA 에 DA3 점 깊이 prior (log 깊이 표준편차, 0 = 끔. --depth-prior da3 의 앵커 깊이 사용)
   bool ba_drop_obs = false;   // local BA 이상치: 안 맞는 관측만 빼고 (ORB-SLAM), 좋은 관측이 2개 미만인 점만 맵에서 제거
   double ba_line_depth_sigma = 0;  // (ba_lines) 라인 끝점 DA3 log-depth prior σ (0 = 끔): 광선 방향 위치 / 진행 방향 라인을 묶음
+  bool ba_line_nowrite = false;  // (ba_lines) 실험: BA 라인은 포즈만 제약하고 맵 라인에는 안 써넣음 (이상치 라인 삭제만)
   bool recover = false;       // 추적 실패 다음 프레임: 외삽 포즈 + DA3 깊이 (da3_ref 로 VO 단위) 트랙 점 -> 같은 좌표계 / 스케일로 계속
   bool keyframes = false;     // 매핑과 상관없이 키프레임 목록 유지 (루프 클로저용)
 };

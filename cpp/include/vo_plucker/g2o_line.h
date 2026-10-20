@@ -8,6 +8,9 @@
 //   pose : dm_c/dw = -[m_c]x,  dm_c/dv = -[d_c]x          (d_c = R d)
 //   line : dm/dtheta = -cos(phi) U [e1]x,  dd/dtheta = -sin(phi) U [e2]x,  dm/dphi = -sin(phi) u1,  dd/dphi = cos(phi) u2
 //          dm_c = R dm + [t]x R dd
+// 라인 좌표 원점 c (세계): 정점 라인은 c 기준 (m' = m - c x d), 엣지는 t' = R c + t 로 같은 투영. 세계 원점에서 먼 라인은
+//   |m| 이 커서 phi ~ 0 -> d(거리)/d(phi) = 1/sin^2(phi) 가 수십만, 헤시안이 커져 LM 초기 lambda (최대 대각 x 1e-5) 가 포즈 갱신을
+//   누름 (KITTI 06 은 원점에서 수백 VO 단위). local BA 는 라인마다 첫 관측 키프레임 카메라 중심을 c 로
 #pragma once
 #include <g2o/core/base_binary_edge.h>
 #include <g2o/core/base_vertex.h>
@@ -36,6 +39,12 @@ inline LineOrth to_orth(const Line& L) {
   return o;
 }
 
+inline Line shift_line(const Line& L, const Vec3& c) {  // 원점을 c 로 옮긴 같은 라인: m' = m - c x d
+  Line S = L;
+  S.tail<3>() -= c.cross(L.head<3>());
+  return S;
+}
+
 inline Line from_orth(const LineOrth& o) {  // |d| = 1 (vo_plucker 규약)
   const Vec3 m = std::cos(o.phi) * o.U.col(0), d = std::sin(o.phi) * o.U.col(1);
   Line L;
@@ -59,6 +68,7 @@ class EdgeLineProjection : public g2o::BaseBinaryEdge<2, Vec4, VertexLineOrth, g
   using Base = g2o::BaseBinaryEdge<2, Vec4, VertexLineOrth, g2o::VertexSE3Expmap>;
   using Base::linearizeOplus;  // 작업공간을 받는 오버로드도 보이게
   Mat3 KL = Mat3::Identity();
+  Vec3 c = Vec3::Zero();  // 라인 좌표 원점 (세계)
 
   void computeError() override {
     Vec3 l, mc, dc;
@@ -87,7 +97,7 @@ class EdgeLineProjection : public g2o::BaseBinaryEdge<2, Vec4, VertexLineOrth, g
     const LineOrth& o = static_cast<const VertexLineOrth*>(_vertices[0])->estimate();
     const g2o::SE3Quat& T = static_cast<const g2o::VertexSE3Expmap*>(_vertices[1])->estimate();
     const Mat3 R = T.rotation().toRotationMatrix();
-    const Mat3 tR = skew(T.translation()) * R;
+    const Mat3 tR = skew(R * c + T.translation()) * R;
     const double c = std::cos(o.phi), sn = std::sin(o.phi);
     Eigen::Matrix<double, 3, 4> dline;
     dline.leftCols<3>() = R * (-c * o.U * skew(Vec3::UnitX())) + tR * (-sn * o.U * skew(Vec3::UnitY()));
@@ -107,7 +117,7 @@ class EdgeLineProjection : public g2o::BaseBinaryEdge<2, Vec4, VertexLineOrth, g
     const Mat3 R = T.rotation().toRotationMatrix();
     const Vec3 m = std::cos(o.phi) * o.U.col(0), d = std::sin(o.phi) * o.U.col(1);
     dc = R * d;
-    mc = R * m + T.translation().cross(dc);
+    mc = R * m + (R * c + T.translation()).cross(dc);
     l = KL * mc;
   }
 };

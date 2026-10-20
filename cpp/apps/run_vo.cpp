@@ -60,7 +60,7 @@ static const char* kValueOpts[] = {"--video", "--gt", "--calib", "--traj", "--da
                                    "--stride", "--resize", "--traj-online", "--dump-map", "--snapshot", "--loop-pr", "--loop-ver",
                                    "--loop-python", "--da3-range", "--da3-model", "--ba-line-prior", "--depth", "--depth-conf", "--depth-conf-min", "--depth-max",
                                    "--depth-scale"};
-static const char* kFlagOpts[] = {"--no-loop", "--no-da3", "--no-viewer", "--autostart", "--sync", "--no-lines", "--ba-lines"};
+static const char* kFlagOpts[] = {"--no-loop", "--no-da3", "--no-viewer", "--autostart", "--sync", "--no-lines", "--ba-lines", "--ba-line-nowrite"};
 
 static bool known_args(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
@@ -204,6 +204,7 @@ int main(int argc, char** argv) {
   prm.ba_drop_obs = true;   // local BA 이상치는 관측만 빼고 점은 유지 (점을 통째로 지우면 PGO 보정 뒤 창이 비어 EuRoC 추적 실패)
   prm.ba_lines = flag(argc, argv, "--ba-lines");  // 실험: local / 전역 BA 에 Plücker 라인 (orthonormal 4-DoF)
   prm.ba_line_depth_sigma = std::atof(arg(argc, argv, "--ba-line-prior", "0"));  // 실험: 라인 끝점 DA3 log-depth prior σ
+  prm.ba_line_nowrite = flag(argc, argv, "--ba-line-nowrite");  // 실험: BA 라인을 맵에 안 써넣음 (포즈 제약만)
   const char* depth_pat = arg(argc, argv, "--depth", nullptr);  // iPhone LiDAR 같은 프레임별 metric depth 영상 (RGB-D 모드)
   const char* conf_pat = arg(argc, argv, "--depth-conf", nullptr);
   const int conf_min = std::atoi(arg(argc, argv, "--depth-conf-min", "2"));
