@@ -207,7 +207,9 @@ void VOTracker::update_map(int k) {
   }
   if (!prm.use_lines) return;
   for (int j : o.lid) {
-    if (mature_l.count(j) || !frames_for(first_l.at(j), [&](int f) { return obs[f].line(j) != nullptr; })) continue;
+    if (mature_l.count(j) ||
+        !frames_for(first_l.at(j), [&](int f) { return obs[f].line(j) != nullptr && !bad_lobs.count(obs_key(f, j)); }))
+      continue;
     P.clear();
     std::vector<Vec4> sgs;
     for (int f : fr) P.push_back(poses[f]), sgs.push_back(*obs[f].line(j));

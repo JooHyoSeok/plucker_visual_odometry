@@ -4,7 +4,7 @@
 //   기본 = 지금 최고 설정 (PROGRESS.md 섹션 12): 루프 + DA3 앵커 (BA 깊이 prior, 단일 시점 라인, 루프 3D, 추적 복구) + local BA
 //   스레드 + 맵 재사용 + 끝에 전역 BA. --no-loop / --no-da3 로만 끔. --calib 이 없으면 영상 폴더 옆 calib.txt (KITTI / EuRoC 변환본)
 //   실험용: [N_FRAMES] --sync (루프 / BA 를 트래킹 안에서, 결정적) --da3-cache DIR (DA3 깊이맵 저장, 같은 결과 + GPU 없음)
-//           --kf-out FILE --realtime HZ --start N --stride N --resize S --no-lines --traj-online FILE --dump-map FILE
+//           --kf-out FILE --realtime HZ --start N --stride N --resize S --no-lines --ba-lines --traj-online FILE --dump-map FILE
 //           --snapshot FILE --loop-pr thumb|netvlad|salad|mast3r --loop-ver orb|mast3r|orb+mast3r --loop-python PY
 //           --da3-range MIN,MAX (기본: 첫 프레임 DA3 깊이로 실내 0.5,20 / 실외 3,40)
 //           --da3-model metric|nested (기본 DA3METRIC-LARGE 0.35B: NESTED-GIANT-LARGE 1.40B 보다 3.3 배 빠르고 KITTI 가 더 정확)
@@ -60,7 +60,7 @@ static const char* kValueOpts[] = {"--video", "--gt", "--calib", "--traj", "--da
                                    "--stride", "--resize", "--traj-online", "--dump-map", "--snapshot", "--loop-pr", "--loop-ver",
                                    "--loop-python", "--da3-range", "--da3-model", "--depth", "--depth-conf", "--depth-conf-min", "--depth-max",
                                    "--depth-scale"};
-static const char* kFlagOpts[] = {"--no-loop", "--no-da3", "--no-viewer", "--autostart", "--sync", "--no-lines"};
+static const char* kFlagOpts[] = {"--no-loop", "--no-da3", "--no-viewer", "--autostart", "--sync", "--no-lines", "--ba-lines"};
 
 static bool known_args(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
@@ -202,6 +202,7 @@ int main(int argc, char** argv) {
   prm.use_lines = !flag(argc, argv, "--no-lines");
   prm.kf_parallax_px = 25;  // 키프레임: 회전 보정 parallax 중앙값 [px] (10 -> 25: 키프레임 57 % 적고 같은 정확도)
   prm.ba_drop_obs = true;   // local BA 이상치는 관측만 빼고 점은 유지 (점을 통째로 지우면 PGO 보정 뒤 창이 비어 EuRoC 추적 실패)
+  prm.ba_lines = flag(argc, argv, "--ba-lines");  // 실험: local / 전역 BA 에 Plücker 라인 (orthonormal 4-DoF)
   const char* depth_pat = arg(argc, argv, "--depth", nullptr);  // iPhone LiDAR 같은 프레임별 metric depth 영상 (RGB-D 모드)
   const char* conf_pat = arg(argc, argv, "--depth-conf", nullptr);
   const int conf_min = std::atoi(arg(argc, argv, "--depth-conf-min", "2"));

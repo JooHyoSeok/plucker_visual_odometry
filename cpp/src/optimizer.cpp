@@ -190,7 +190,7 @@ struct LocalBAProblem {
   std::unordered_map<int, g2o::SE3Quat> pose0;  // build 때 포즈 / 점 (BA 전 오차 계산용)
   std::unordered_map<int, Vec3> X0;
   struct Obs { g2o::EdgeSE3ProjectXYZ* e; int j, f; };
-  struct LObs { EdgeLineProjection* e; int j; };
+  struct LObs { EdgeLineProjection* e; int j, f; };
   std::vector<Obs> edges;
   std::vector<LObs> ledges;
   std::vector<std::pair<EdgeLogDepth*, int>> dedges;  // DA3 깊이 prior (엣지, 점 id)
@@ -309,7 +309,7 @@ LocalBAPtr local_ba_build(const VOTracker& vo, int window, int max_fixed, bool l
     for (int j : ls) {
       std::vector<std::pair<int, const Vec4*>> seen;
       for (auto& [f, v] : vk)
-        if (const Vec4* sg = vo.obs[f].line(j)) seen.emplace_back(f, sg);
+        if (const Vec4* sg = vo.obs[f].line(j); sg && !vo.bad_lobs.count(VOTracker::obs_key(f, j))) seen.emplace_back(f, sg);
       if (seen.size() < 2) continue;
       // 퇴화 라인 제외: 창 안 첫 / 마지막 관측의 역투영 평면 각도가 작으면 (진행 방향을 향하는 라인 등)
       // 라인 위치가 거의 안 정해져서 포즈 회전을 끌고 감 (06: 라인 BA 만 켜면 마지막 방향 오차 1.3 -> 21 deg)
@@ -333,7 +333,7 @@ LocalBAPtr local_ba_build(const VOTracker& vo, int window, int max_fixed, bool l
         e->setRobustKernel(rk);
         e->KL = vo.cam.KL;
         opt.addEdge(e);
-        P->ledges.push_back({e, j});
+        P->ledges.push_back({e, j, f});
       }
     }
   }
@@ -420,9 +420,19 @@ LocalBAStats local_ba_apply(VOTracker& vo, LocalBAProblem& P) {
     }
   }
   st.outliers = bad.size();
-  std::unordered_set<int> lbad;
-  for (auto& o : P.ledges)
-    if (o.e->computeError(), o.e->chi2() > kBaChi2) lbad.insert(o.j);
+  std::unordered_set<int> lbad;  // 라인도 점과 같이: 나쁜 관측만 빼고 좋은 관측이 2개 이상이면 유지
+  std::unordered_map<int, int> lgood;
+  for (auto& o : P.ledges) {
+    o.e->computeError();
+    if (o.e->chi2() > kBaChi2) {
+      lbad.insert(o.j);
+      if (vo.prm.ba_drop_obs) vo.bad_lobs.insert(VOTracker::obs_key(o.f, o.j));
+    } else {
+      ++lgood[o.j];
+    }
+  }
+  if (vo.prm.ba_drop_obs)
+    for (auto it = lbad.begin(); it != lbad.end();) it = lgood[*it] >= 2 ? lbad.erase(it) : std::next(it);
   for (auto& [j, l] : P.vl) {
     if (!vo.map_l.count(j)) continue;
     if (lbad.count(j)) {
