@@ -225,6 +225,48 @@ void VOTracker::update_map(int k) {
   }
 }
 
+double VOTracker::kf_scale(int f) const {
+  std::vector<double> r;
+  if (const auto it = da3.find(f); it != da3.end() && has_pose[f])
+    for (const auto& [j, d] : it->second)
+      if (const auto X = map_p.find(j); X != map_p.end())
+        if (const double z = (poses[f].R * X->second + poses[f].t)(2); z > 0) r.push_back(z / d);
+  if (r.size() < 20) return da3_ref;
+  std::nth_element(r.begin(), r.begin() + r.size() / 2, r.end());
+  return r[r.size() / 2];
+}
+
+void dense_points(const std::vector<std::tuple<std::shared_ptr<const VOTracker::DenseKF>, Pose, double>>& kfs, double voxel,
+                  std::vector<Vec3>& X, std::vector<std::array<uint8_t, 3>>& rgb) {
+  X.clear(), rgb.clear();
+  std::unordered_set<long long> seen;
+  for (const auto& [d, P, a] : kfs) {
+    const Mat3 Rt = P.R.transpose();
+    for (size_t i = 0; i < d->X.size(); ++i) {
+      const Vec3 w = Rt * (a * d->X[i].cast<double>() - P.t);
+      if (voxel > 0) {  // 칸 번호 축마다 21 비트
+        const long long kx = std::llround(std::floor(w(0) / voxel)) & 0x1FFFFF, ky = std::llround(std::floor(w(1) / voxel)) & 0x1FFFFF,
+                        kz = std::llround(std::floor(w(2) / voxel)) & 0x1FFFFF;
+        if (!seen.insert(kx << 42 | ky << 21 | kz).second) continue;
+      }
+      X.push_back(w), rgb.push_back(d->rgb[i]);
+    }
+  }
+}
+
+void VOTracker::dense_world(std::vector<Vec3>& X, std::vector<std::array<uint8_t, 3>>& rgb, double voxel) const {
+  std::vector<int> fs;
+  for (const auto& [f, d] : dense)
+    if (f < int(has_pose.size()) && has_pose[f]) fs.push_back(f);
+  std::sort(fs.begin(), fs.end());
+  std::vector<std::tuple<std::shared_ptr<const DenseKF>, Pose, double>> kfs;
+  for (int f : fs) {
+    const auto s = dense_scale.find(f);
+    kfs.emplace_back(dense.at(f), poses[f], s != dense_scale.end() ? s->second : da3_ref);
+  }
+  dense_points(kfs, voxel, X, rgb);
+}
+
 bool VOTracker::is_keyframe(int k, int n_map_used) const {
   // 직전 키프레임 대비 회전 보정 parallax (같은 트랙의 픽셀 이동에서 회전만으로 설명되는 부분을 뺀 것) 중앙값
   const int last = kfs.back();

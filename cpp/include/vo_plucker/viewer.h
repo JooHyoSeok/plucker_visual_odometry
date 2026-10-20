@@ -1,5 +1,6 @@
 // Map viewer (Pangolin, own thread), like ORB-SLAM's Viewer + MapDrawer + FrameDrawer.
 //   top   : 3D map points (gray, visible = red), Plücker line segments (blue), trajectory (green),
+//           dense map (keyframe DA3 depth in colour, recomputed from the current keyframe poses every 15 frames),
 //           ground truth (gray, origin-anchored, scale from the first 50 frames), current camera
 //           "Sim3 align": Umeyama Sim(3) of the trajectory so far onto GT (as for ATE) -> everything drawn in GT
 //           coordinates, yellow segments = position error every 10 frames, ATE shown in the menu
@@ -71,6 +72,12 @@ class Viewer {
   std::vector<int> segs_vis_;
   Pose cur_;
   bool has_cur_ = false;
+  // 덴스 맵: 추적 스레드가 15 프레임마다 (키프레임 샘플, 포즈, 스케일) 스냅샷 -> 뷰어가 별도 작업 스레드에서 월드 점 ->
+  // GPU 버퍼 (VBO) 에 올려 한 번에 그림 (점 수백만 개를 즉시 모드로 그리면 그리는 동안 잡은 잠금 때문에 추적까지 멈춤)
+  std::vector<std::tuple<std::shared_ptr<const VOTracker::DenseKF>, Pose, double>> dense_snap_;
+  std::atomic<bool> dense_new_{false};
+  double dense_voxel_ = 0;
+  int dense_frame_ = -1000;
 };
 
 }  // namespace vp

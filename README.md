@@ -47,6 +47,8 @@ cpp/build/run_vo --video dataset/sequences/00/image_2/%06d.png --gt dataset/pose
   (vanishing point) constraints from line segments in local BA against rotation drift (`--ba-vp 0.5` px), local BA in a
   LocalMapping thread (bad observations dropped, points kept), map reuse by ORB projection search, tracking-failure recovery
   and a fallback initialization from DA3 depth, and one global BA at the end (`*_pregba.txt` = the same run before it).
+  Online dense map: the DA3 depth of every anchored keyframe on a ~3000-sample grid (RGB), placed with the current keyframe
+  poses (follows loop / BA corrections), shown in the viewer ("Dense map"), saved with `--dense-out FILE.ply`.
 - Options: `--no-loop`, `--no-da3` (plain monocular, no Python / GPU), `--no-viewer`, `--autostart` (skip the viewer start
   menu, where loop closure / detector / verifier / lines / DA3 can be chosen). Without `--calib fx,fy,cx,cy` the intrinsics
   come from `calib.txt` next to the image folder (KITTI odometry, EuRoC converter output). Unknown options are an error.
@@ -56,7 +58,7 @@ cpp/build/run_vo --video dataset/sequences/00/image_2/%06d.png --gt dataset/pose
   Table with other methods: `cpp/tools/kitti_table_tex.py` (LaTeX -> PDF / PNG).
 - Experiment options: `[N_FRAMES]`, `--sync` (loop closure and local BA inline: deterministic), `--da3-cache DIR` (DA3 depth
   maps stored by image hash: identical runs without GPU, for comparisons only; fill with `cpp/tools/da3_cache.py`),
-  `--kf-out FILE`, `--realtime HZ`, `--start N`, `--stride N`, `--resize S`, `--no-lines`, `--traj-online FILE`,
+  `--kf-out FILE`, `--dense-out FILE.ply`, `--dense-px N` (dense grid step, 0 = off), `--realtime HZ`, `--start N`, `--stride N`, `--resize S`, `--no-lines`, `--traj-online FILE`,
   `--dump-map FILE`, `--snapshot FILE`, `--loop-pr thumb|netvlad|salad|mast3r`, `--loop-ver orb|mast3r|orb+mast3r` (learned
   modules in `python/loop_server.py`, MASt3R is CC BY-NC-SA), `--loop-python PY`, `--da3-range MIN,MAX` (default from the DA3
   depth of the first frame: indoor 0.5-20 m, outdoor 3-40 m), `--da3-model metric|nested` (nested = DA3NESTED-GIANT-LARGE,

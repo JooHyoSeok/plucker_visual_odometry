@@ -56,7 +56,7 @@ static bool flag(int argc, char** argv, const char* name) {
 }
 
 // 인자 목록: 모르는 인자 (예전 실험 인자 포함) 는 에러 -> 조용히 기본값으로 도는 일이 없게
-static const char* kValueOpts[] = {"--video", "--gt", "--calib", "--traj", "--da3-cache", "--kf-out", "--realtime", "--start",
+static const char* kValueOpts[] = {"--video", "--gt", "--calib", "--traj", "--da3-cache", "--kf-out", "--dense-out", "--dense-px", "--realtime", "--start",
                                    "--stride", "--resize", "--traj-online", "--dump-map", "--snapshot", "--loop-pr", "--loop-ver",
                                    "--loop-python", "--da3-range", "--da3-model", "--ba-line-prior", "--ba-vp", "--depth", "--depth-conf", "--depth-conf-min", "--depth-max",
                                    "--depth-scale"};
@@ -317,6 +317,9 @@ int main(int argc, char** argv) {
             : loop_ver == "mast3r" ? make_py_verifier(srv, cam)
                                    : make_cascade_verifier(cam, make_py_verifier(srv, cam));
     }
+    // 덴스 맵: 앵커 키프레임 DA3 깊이를 키프레임당 ~3000 점 격자로 (KITTI 12 px, EuRoC 11 px), --dense-px 0 = 끔
+    const std::string dpx = std::to_string(std::max(4, int(std::lround(std::sqrt(double(cam.W) * cam.H / 3000)))));
+    lprm.dense_px = use_anchor ? std::atoi(arg(argc, argv, "--dense-px", dpx.c_str())) : 0;
     loop = std::make_unique<LoopCloser>(vo, std::move(pr), std::move(ver), lprm, use_anchor ? srv : nullptr);
   }
   // --traj-online: 프레임마다 그 순간의 추정 포즈 (나중 루프 보정 전 값) "k T_wc(3x4)" -> 영상 도구용
@@ -515,6 +518,9 @@ int main(int argc, char** argv) {
                   vo.da3_sigma > 0 ? vo.da3_sigma : prm.ba_depth_sigma);
     if (prm.da3_points) std::printf("  DA3 map points (pseudo RGB-D): %ld\n", loop->n_da3_points);
     if (prm.da3_lines) std::printf("  DA3 map lines (single-view Plücker from DA3 depth): %ld\n", loop->n_da3_lines);
+    if (lprm.dense_px > 0)
+      std::printf("  dense map: %zu keyframes, %ld points (grid %d px), %ld depth-edge samples dropped\n", vo.dense.size(),
+                  loop->n_dense_pts, lprm.dense_px, loop->n_dense_edge);
     if (loop->n_rejected_pgo) std::printf("  loops rejected after PGO (edge still inconsistent): %d\n", loop->n_rejected_pgo);
     if (loop->n_bad_scale) std::printf("  loop candidates rejected for Sim(3) scale ratio outside 1/3..3: %d\n", loop->n_bad_scale);
     if (use_anchor)
@@ -619,19 +625,27 @@ int main(int argc, char** argv) {
     for (int f : vo.kfs) {
       if (!vo.has_pose[f]) continue;
       const Pose& P = vo.poses[f];
-      std::vector<double> r;
-      if (const auto it = vo.da3.find(f); it != vo.da3.end())
-        for (const auto& [j, d] : it->second)
-          if (const auto X = vo.map_p.find(j); X != vo.map_p.end())
-            if (const double z = (P.R * X->second + P.t)(2); z > 0) r.push_back(z / d);
-      double a = vo.da3_ref;
-      if (r.size() >= 20) std::nth_element(r.begin(), r.begin() + r.size() / 2, r.end()), a = r[r.size() / 2];
-      fk << f << ' ' << a;
+      fk << f << ' ' << vo.kf_scale(f);
       for (int i = 0; i < 3; ++i)
         for (int j = 0; j < 3; ++j) fk << ' ' << P.R(i, j);
       fk << ' ' << P.t(0) << ' ' << P.t(1) << ' ' << P.t(2) << '\n';
     }
     std::printf("saved %s (%zu keyframes)\n", kp, vo.kfs.size());
+  }
+  // --dense-out FILE.ply: 덴스 맵 (최종 맵 기준 키프레임 스케일로 다시, 5 cm 복셀, VO 단위 = 궤적과 같은 좌표), binary PLY xyz + rgb
+  if (const char* dp = arg(argc, argv, "--dense-out", nullptr); dp && !vo.dense.empty()) {
+    for (auto& [f, a] : vo.dense_scale) a = vo.kf_scale(f);
+    std::vector<Vec3> X;
+    std::vector<std::array<uint8_t, 3>> rgb;
+    vo.dense_world(X, rgb, 0.05 * vo.da3_ref);
+    std::ofstream fd(dp, std::ios::binary);
+    fd << "ply\nformat binary_little_endian 1.0\ncomment VO units, " << vo.da3_ref << " per DA3 metre\nelement vertex " << X.size()
+       << "\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n";
+    for (size_t i = 0; i < X.size(); ++i) {
+      const float v[3] = {float(X[i](0)), float(X[i](1)), float(X[i](2))};
+      fd.write(reinterpret_cast<const char*>(v), sizeof v), fd.write(reinterpret_cast<const char*>(rgb[i].data()), 3);
+    }
+    std::printf("saved %s (%zu dense points, 5 cm voxels)\n", dp, X.size());
   }
   print_ate(C, std::vector<Eigen::Matrix<double, 3, 4>>(gt.begin() + std::min<size_t>(f0, gt.size()), gt.end()));
 #ifdef VP_WITH_VIEWER

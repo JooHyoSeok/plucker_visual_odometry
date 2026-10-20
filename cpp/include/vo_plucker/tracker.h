@@ -7,10 +7,13 @@
 //   depth  : (use_depth) metric depth per point (e.g. LiDAR / depth network): init from one frame, points with depth
 //            go straight into the map (frozen), tracking 6-DoF against the map; points without depth are triangulated
 #pragma once
+#include <array>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -138,6 +141,18 @@ class VOTracker {
   // (ba_vp_sigma) 구조 방향 = 나란한 선분 묶음의 세계 단위 방향 (소실점), 키프레임 -> (선분 번호 obs[f].seg, 방향 번호)
   std::vector<Vec3> dirs;
   std::unordered_map<int, std::vector<std::pair<int, int>>> dir_obs;
+  // 덴스 맵 (LoopParams::dense_px): 키프레임 -> DA3 깊이 격자 샘플 (그 키프레임 카메라 좌표 [DA3 m], 색 RGB). 루프 스레드가 앵커 때
+  // 한 번 기록 (뒤로 안 바뀜 -> 뷰어가 잠금 없이 읽게 shared_ptr), dense_scale = 그 키프레임 VO 단위 / DA3 m (루프 / 앵커 보정 때 갱신)
+  struct DenseKF {
+    std::vector<Eigen::Vector3f> X;
+    std::vector<std::array<uint8_t, 3>> rgb;
+  };
+  std::unordered_map<int, std::shared_ptr<const DenseKF>> dense;
+  std::unordered_map<int, double> dense_scale;
+  // 키프레임 f 의 지금 VO 단위 / DA3 m: 앵커 점들의 (지금 맵의 VO 깊이 / DA3 깊이) 중앙값, 20 개 미만이면 da3_ref
+  double kf_scale(int f) const;
+  // 덴스 맵 월드 점 (지금 키프레임 포즈 + dense_scale), voxel [VO 단위] 칸마다 처음 점 하나 (0 = 그대로)
+  void dense_world(std::vector<Vec3>& X, std::vector<std::array<uint8_t, 3>>& rgb, double voxel) const;
   static long long obs_key(int f, int j) { return (long long)f << 32 | unsigned(j); }
   int n_still = 0;       // 정지로 판정한 프레임 수
   int n_map6dof = 0;     // parallax가 작아서 맵 기준 6-DoF로 추정한 프레임 수
@@ -169,5 +184,10 @@ class VOTracker {
     return false;
   }
 };
+
+// 덴스 맵 월드 점: (키프레임 샘플, 포즈, VO 단위 / DA3 m) 목록 -> 점 / 색, voxel [VO 단위] 칸마다 처음 점 하나 (0 = 그대로).
+// 뷰어 스레드는 추적 스레드가 찍은 스냅샷으로 계산 (샘플은 바뀌지 않아서 잠금 없이)
+void dense_points(const std::vector<std::tuple<std::shared_ptr<const VOTracker::DenseKF>, Pose, double>>& kfs, double voxel,
+                  std::vector<Vec3>& X, std::vector<std::array<uint8_t, 3>>& rgb);
 
 }  // namespace vp

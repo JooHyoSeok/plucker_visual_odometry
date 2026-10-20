@@ -9,6 +9,8 @@ the Sim(3) that aligns the keyframe camera centers to the GT camera centers of t
 usage: python3 dense_map.py --kf KF.txt --images 'seq/image_0/%06d.png' --calib fx,fy,cx,cy --out cloud.ply
                             [--every 2] [--stride 4] [--range 0.5,20] [--voxel 0.05]
                             [--gt-traj poses.txt --gt-cloud data.ply]   (GT: KITTI format T_wc per frame)
+       python3 dense_map.py --kf KF.txt --cloud online.ply --out aligned.ply --gt-traj poses.txt --gt-cloud data.ply
+         (evaluate run_vo --dense-out instead: no DA3 inference, same alignment / metrics)
 """
 import argparse
 import sys
@@ -47,8 +49,9 @@ def voxel(points, size):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--kf", required=True)
-    ap.add_argument("--images", required=True)
-    ap.add_argument("--calib", required=True)
+    ap.add_argument("--images")
+    ap.add_argument("--calib")
+    ap.add_argument("--cloud", help="run_vo --dense-out PLY (binary xyz float + rgb uchar, VO units) instead of DA3 inference")
     ap.add_argument("--out", required=True)
     ap.add_argument("--every", type=int, default=2)
     ap.add_argument("--stride", type=int, default=4)
@@ -58,9 +61,26 @@ def main():
     ap.add_argument("--gt-traj")
     ap.add_argument("--gt-cloud")
     o = ap.parse_args()
+    frames, a, R, t = load_kf(o.kf)
+    if o.cloud:
+        W = read_ply(o.cloud)
+        print(f"{o.cloud}: {len(W)} points")
+    else:
+        W = infer(o, frames, a, R, t)
+    evaluate(o, W, frames, R, t)
+
+
+def read_ply(path):  # run_vo --dense-out: binary_little_endian, float x y z + uchar r g b
+    raw = Path(path).read_bytes()
+    head = raw[:raw.index(b"end_header\n") + 11]
+    n = int(next(l for l in head.decode().splitlines() if l.startswith("element vertex")).split()[2])
+    v = np.frombuffer(raw[len(head):], dtype=np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("rgb", "u1", 3)]), count=n)
+    return np.stack([v["x"], v["y"], v["z"]], 1).astype(np.float64)
+
+
+def infer(o, frames, a, R, t):
     fx, fy, cx, cy = (float(x) for x in o.calib.split(","))
     zmin, zmax = (float(x) for x in o.range.split(","))
-    frames, a, R, t = load_kf(o.kf)
     sys.path.insert(0, str(DA3_SRC))
     from depth_anything_3.api import DepthAnything3
     net = DepthAnything3.from_pretrained("depth-anything/DA3NESTED-GIANT-LARGE").to("cuda").eval()
@@ -82,6 +102,10 @@ def main():
     W = np.vstack(clouds)
     W = voxel(W, o.voxel * np.median(a))
     print(f"fused: {len(W)} points (voxel {o.voxel} m)")
+    return W
+
+
+def evaluate(o, W, frames, R, t):
     out = W
     if o.gt_traj:
         G = np.loadtxt(o.gt_traj).reshape(-1, 3, 4)[:, :, 3]

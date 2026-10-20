@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <future>
 #include <opencv2/imgproc.hpp>
+#include <pangolin/gl/glvbo.h>
 #include <pangolin/pangolin.h>
 
 namespace vp {
@@ -154,6 +156,15 @@ void Viewer::update(const cv::Mat& bgr, const VOTracker& vo) {
     }
     cur_ = p, has_cur_ = true;
   }
+  if (!vo.dense.empty() && k - dense_frame_ >= 15) {  // 덴스 맵 스냅샷 (월드 점 계산은 뷰어 스레드에서, 표시용 10 cm 복셀)
+    dense_snap_.clear();
+    for (const auto& [f, d] : vo.dense)
+      if (f < int(vo.has_pose.size()) && vo.has_pose[f]) {
+        const auto s = vo.dense_scale.find(f);
+        dense_snap_.emplace_back(d, vo.poses[f], s != vo.dense_scale.end() ? s->second : vo.da3_ref);
+      }
+    dense_voxel_ = 0.1 * vo.da3_ref, dense_frame_ = k, dense_new_ = true;
+  }
 }
 
 void Viewer::global_ba_start() {
@@ -257,7 +268,8 @@ void Viewer::run() {
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-  pangolin::CreatePanel("menu").SetBounds(img_frac, 1.0, 0.0, pangolin::Attach::Pix(PANEL));
+  // 메뉴는 창 전체 높이 (시작 화면 + 표시 항목 + ATE 칸이 24 줄: 위쪽 68 % 에서는 넘쳐서 이름표와 값 칸이 어긋남), 영상은 메뉴 오른쪽 아래
+  pangolin::CreatePanel("menu").SetBounds(0.0, 1.0, 0.0, pangolin::Attach::Pix(PANEL));
   // 시작 화면: 체크박스 묶음을 서로 배타적으로 (Pangolin 에 콤보박스가 없음). Start 뒤에는 잠금
   using Box = std::unique_ptr<pangolin::Var<bool>>;
   const std::vector<std::string> PR{"thumb", "netvlad", "salad", "mast3r"}, VER{"orb", "mast3r", "orb+mast3r"};
@@ -287,7 +299,7 @@ void Viewer::run() {
   };
   pangolin::Var<bool> follow("menu.Follow camera", true, true), show_pts("menu.Points", true, true),
       show_lines("menu.Lines", true, true), show_gt("menu.Ground truth", true, true), pause("menu.Pause", false, true),
-      top("menu.Top view", false, false), align("menu.Sim3 align", align_init_, true);
+      top("menu.Top view", false, false), align("menu.Sim3 align", align_init_, true), show_dense("menu.Dense map", true, true);
   pangolin::Var<std::string> ate_txt("menu.ATE", "-"), ate_pre_txt("menu.ATE before GBA", "-"), gba_txt("menu.Global BA", "-");
   pangolin::OpenGlRenderState s_cam(pangolin::ProjectionMatrix(W, H, 600, 600, W / 2.0, H / 2.0, 0.1, 1e5),
                                     pangolin::ModelViewLookAt(0, -12, -25, 0, 0, 10, 0, -1, 0));
@@ -295,9 +307,12 @@ void Viewer::run() {
   pangolin::View& d_cam = pangolin::CreateDisplay()
                               .SetBounds(img_frac, 1.0, pangolin::Attach::Pix(PANEL), 1.0, map_aspect)
                               .SetHandler(new pangolin::Handler3D(s_cam));
-  pangolin::View& d_img = pangolin::CreateDisplay().SetBounds(0.0, img_frac, 0.0, 1.0, double(cam_.W) / cam_.H);
+  pangolin::View& d_img = pangolin::CreateDisplay().SetBounds(0.0, img_frac, pangolin::Attach::Pix(PANEL), 1.0, double(cam_.W) / cam_.H);
   pangolin::GlTexture tex(cam_.W, cam_.H, GL_RGB, false, 0, GL_BGR, GL_UNSIGNED_BYTE);
 
+  pangolin::GlBuffer dense_vbo, dense_cbo;  // 덴스 맵 (뷰어 스레드의 GL 문맥에서만)
+  size_t dense_n = 0;
+  std::future<std::pair<std::vector<float>, std::vector<uint8_t>>> dense_job;
   pangolin::OpenGlMatrix last_twc;
   last_twc.SetIdentity();
   int snap_frames = -1;
@@ -311,6 +326,32 @@ void Viewer::run() {
         started_ = true;
         *ui_state = start_->loop ? "running: " + start_->pr + " + " + start_->ver : "running: no loop";
         start_cv_.notify_all();
+      }
+    }
+    if (dense_new_ && !dense_job.valid()) {  // 새 덴스 스냅샷: 월드 점은 작업 스레드에서 (샘플은 안 바뀌어서 잠금 없이)
+      decltype(dense_snap_) snap;
+      double vox;
+      {
+        std::lock_guard<std::mutex> lk(mu_);
+        snap.swap(dense_snap_), vox = dense_voxel_, dense_new_ = false;
+      }
+      dense_job = std::async(std::launch::async, [snap = std::move(snap), vox] {
+        std::vector<Vec3> X;
+        std::vector<std::array<uint8_t, 3>> c;
+        dense_points(snap, vox, X, c);
+        std::vector<float> xyz(3 * X.size());
+        std::vector<uint8_t> rgb(3 * X.size());
+        for (size_t i = 0; i < X.size(); ++i)
+          for (int k = 0; k < 3; ++k) xyz[3 * i + k] = float(X[i](k)), rgb[3 * i + k] = c[i][k];
+        return std::make_pair(std::move(xyz), std::move(rgb));
+      });
+    }
+    if (dense_job.valid() && dense_job.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+      const auto [xyz, rgb] = dense_job.get();
+      dense_n = xyz.size() / 3;
+      if (dense_n) {
+        dense_vbo.Reinitialise(pangolin::GlArrayBuffer, dense_n, GL_FLOAT, 3, GL_STATIC_DRAW, xyz.data());
+        dense_cbo.Reinitialise(pangolin::GlArrayBuffer, dense_n, GL_UNSIGNED_BYTE, 3, GL_STATIC_DRAW, rgb.data());
       }
     }
     glClearColor(0.1f, 0.1f, 0.12f, 1.0f);
@@ -341,6 +382,12 @@ void Viewer::run() {
       if (follow) s_cam.Follow(last_twc);
       d_cam.Activate(s_cam);
       draw_map(show_pts, show_lines, show_gt, aligned ? &S : nullptr);
+      if (show_dense && dense_n > 0) {  // VBO 한 번 호출 (GPU), 맵과 같은 정렬 변환
+        if (aligned) glPushMatrix(), glMultMatrixd(S.data());
+        glPointSize(2);
+        pangolin::RenderVboCbo(dense_vbo, dense_cbo, true, GL_POINTS);
+        if (aligned) glPopMatrix();
+      }
       if (img_new_ && !img_.empty()) {
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);  // 행 바이트 수(W*3)가 4의 배수가 아니면 기본 정렬(4)로는 영상이 기울어짐
         tex.Upload(img_.data, GL_BGR, GL_UNSIGNED_BYTE), img_new_ = false;

@@ -602,6 +602,49 @@ void LoopCloser::run() {
 
 // DA3 깊이로 선분 하나에서 바로 3D 라인 (삼각측량 불가능한 진행 방향 라인도): 3D 직선 위 점의 역깊이는 영상 선분 매개변수 s 의
 // 1차 함수 (1/z = α + β s) -> 샘플 (s, 1/z) 에 Theil-Sen 직선 -> 양 끝 깊이 -> 두 점 -> Plücker. 가림 경계는 앞쪽 (최소 깊이)
+void LoopCloser::add_dense(int kf, const cv::Mat& img, double a_k) {
+  // 앵커 깊이맵 (서버가 보관) 을 dense_px 격자로 받아 키프레임 카메라 좌표 [DA3 m] + 색으로. 깊이 경계의 튀는 점은 버림:
+  // 평면은 역깊이가 영상 좌표에 1 차라서, 가로 / 세로 이웃과의 역깊이 2 차 차분이 깊이의 5 % 를 넘으면 가림 경계로 봄
+  const int s = prm_.dense_px, nu = (vo_.cam.W - s / 2 + s - 1) / s, nv = (vo_.cam.H - s / 2 + s - 1) / s;
+  std::vector<Vec2> uv;
+  uv.reserve(size_t(nu) * nv);
+  for (int j = 0; j < nv; ++j)
+    for (int i = 0; i < nu; ++i) uv.emplace_back(s / 2 + i * s, s / 2 + j * s);
+  const std::vector<double> z = server_depth_kf(*anchor_, kf, uv);
+  auto Z = [&](int i, int j) { return i < 0 || j < 0 || i >= nu || j >= nv ? 0.0 : z[size_t(j) * nu + i]; };
+  auto d = std::make_shared<VOTracker::DenseKF>();
+  for (int j = 0; j < nv; ++j)
+    for (int i = 0; i < nu; ++i) {
+      const double zc = Z(i, j);
+      if (!(zc > 0)) continue;
+      bool edge = false;
+      for (const auto [di, dj] : {std::pair{1, 0}, std::pair{0, 1}}) {
+        const double za = Z(i - di, j - dj), zb = Z(i + di, j + dj);
+        if (za > 0 && zb > 0) edge = edge || std::abs(1 / za + 1 / zb - 2 / zc) * zc > 0.05;
+      }
+      if (edge) {
+        ++n_dense_edge;
+        continue;
+      }
+      const Vec2& p = uv[size_t(j) * nu + i];
+      d->X.push_back((zc * (vo_.cam.Kinv * Vec3(p(0), p(1), 1.0))).cast<float>());
+      const int x = std::min(int(p(0)), img.cols - 1), y = std::min(int(p(1)), img.rows - 1);
+      if (img.channels() == 3) {
+        const cv::Vec3b c = img.at<cv::Vec3b>(y, x);
+        d->rgb.push_back({c[2], c[1], c[0]});
+      } else {
+        const uint8_t g = img.at<uint8_t>(y, x);
+        d->rgb.push_back({g, g, g});
+      }
+    }
+  n_dense_pts += d->X.size();
+  auto l = take_map();
+  const auto tb = Clock::now();
+  vo_.dense[kf] = std::move(d);
+  vo_.dense_scale[kf] = a_k;
+  blocked(ms_since(tb));
+}
+
 void LoopCloser::add_da3_lines(const KFState& st, double a_k) {
   constexpr int kS = 8;
   constexpr double kOff = 3.0;  // 선분 법선 방향 오프셋 [px]
@@ -756,6 +799,7 @@ void LoopCloser::process(int kf, const cv::Mat& img, bool depth) {
         blocked(ms_since(tb));
       }
       if (!st.new_seg.empty()) add_da3_lines(st, *av);
+      if (prm_.dense_px > 0) add_dense(kf, img, *av);
       if (vo_.prm.ba_depth_sigma > 0) {  // local BA 의 점 깊이 prior 용 (subsample 과 같은 순서로 점 id)
         std::vector<std::pair<int, float>> d;
         for (size_t m = 0; m < z.size(); ++m)
@@ -1118,6 +1162,7 @@ void LoopCloser::correct(const std::unordered_map<int, Sim3>& S_kf, const std::v
   if (ver_)
     for (int f : kfs_) ver_->rescale(f, scale[f]);
   for (auto& [f, ak] : anchors_) ak /= scale[f];  // 카메라 좌표가 1/s 배 -> VO 깊이 / 미터도 1/s 배
+  for (auto& [f, a] : vo.dense_scale) a /= scale[f];  // 덴스 맵도 같은 키프레임 스케일
   // 보관된 측정 (cam_from -> cam_to): S' = (1/s_to) S (s_from)
   auto rescale = [&](const Sim3& S, int from, int to) { return Sim3{S.s * scale[from] / scale[to], S.R, S.t / scale[to]}; };
   for (auto& [a, M] : odom_) {

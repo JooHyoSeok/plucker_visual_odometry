@@ -122,6 +122,7 @@ struct LoopParams {
   double fuse_px = 8;         //   보정된 옛 점을 현재 키프레임에 투영했을 때 이 안이어야 융합
   int fuse_nb = 2;            //   옛 키프레임 j 앞뒤로 이만큼의 키프레임까지 융합
   int anchor_every = 10;      // metric depth 앵커: 이 키프레임 수마다 (루프 없이도) PGO
+  int dense_px = 0;           // 덴스 맵: 앵커 키프레임의 DA3 깊이를 이 간격 [px] 격자로 샘플해 VOTracker::dense 에 (0 = 끔)
   double anchor_sigma = 0.08; // 앵커 log-scale 표준편차 (DA3 프레임 간 흔들림 ~6 %)
   bool da3_adaptive = false;  // DA3 잡음을 성숙한 점에서 온라인 추정 -> 앵커 / BA prior σ 를 그만큼 (실내처럼 DA3 가 덜 정확하면 약하게)
   double anchor_min_dev = 0;  // 지난 앵커 PGO 뒤 앵커들의 |log(a_k/a_ref)| 중앙값이 이보다 작으면 PGO 생략 (스케일이 맞음)
@@ -154,6 +155,7 @@ class LoopCloser {
   int n_rejected_pgo = 0;                      // PGO 뒤에도 안 맞아서 버린 루프
   long n_da3_points = 0;                       // (--da3-points) DA3 깊이로 넣은 맵 점
   long n_da3_lines = 0;                        // (--da3-lines) DA3 깊이로 넣은 맵 라인
+  long n_dense_pts = 0, n_dense_edge = 0;      // (dense_px) 덴스 맵에 넣은 점 / 깊이 경계라 뺀 점
   int n_pgo_skipped = 0;                       // 이미 맞는 루프라 PGO 생략
   int n_anchors = 0, n_anchor_pgo = 0, n_anchor_skip = 0;  // 앵커가 붙은 키프레임, 앵커 PGO, 스케일이 맞아서 건너뛴 PGO
   int n_unconfirmed = 0, n_pruned = 0;         // 연속 일관성을 못 채운 검출, PGO 뒤 빠진 루프 엣지
@@ -165,6 +167,7 @@ class LoopCloser {
   void process(int kf, const cv::Mat& img, bool depth = true);  // depth: DA3 앵커도 (밀리면 건너뜀)
   std::unique_lock<std::mutex> take_map() { return vo_.map_lock.worker(); }  // 작업 스레드 쪽 (트래킹이 양보)
   const Eigen::Matrix<double, 7, 7>& loop_info(const LoopEdge& e) const;
+  void add_dense(int kf, const cv::Mat& img, double a_k);  // (dense_px) 키프레임 DA3 깊이 격자 -> VOTracker::dense
   void add_da3_lines(const KFState& st, double a_k);  // (--da3-lines) DA3 깊이로 선분에서 바로 Plücker 라인  // DA3 루프 / 앵커 있음 / 없음
   void blocked(double ms) { ms_blocked += ms, ms_blocked_max = std::max(ms_blocked_max, ms); }
   KFState snapshot(int kf) const;
