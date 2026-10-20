@@ -23,6 +23,16 @@ double vp_dist(const Vec4& s, const Vec3& h);
 // 키프레임 선분 -> 구조 방향 번호 배정 (R = R_cw), 남은 선분에서 RANSAC 으로 새 방향을 dirs 에 추가. 반환 (선분 번호, 방향 번호)
 std::vector<std::pair<int, int>> assign_dirs(const Camera& c, const std::vector<Vec4>& seg, const Mat3& R,
                                              std::vector<Vec3>& dirs, unsigned seed);
+// 구조 방향을 배정된 관측 전체 + 지금 포즈로 다시 추정 (local BA apply, 루프 / 앵커 보정 뒤)
+void refine_dirs(VOTracker& vo);
+// PGO 용 구조 방향 관측 요약: 키프레임 f 의 방향 j 선분들 -> 카메라 좌표 방향 x 에 대한 2 성분 오차 (b1.x, b2.x) 와 정보 diag(l1, l2)
+// (선분마다 px 잔차를 n.x 로 선형화한 가중 법선 산포 sum (g^2 / σ^2) n n^T 의 큰 두 고유값 / 고유 벡터)
+struct DirObs {
+  int f, j;
+  Vec3 b1, b2;
+  double l1, l2;
+};
+std::vector<DirObs> dir_summaries(const VOTracker& vo, const std::vector<int>& kfs);
 
 struct LocalBAStats {
   int kfs = 0, fixed = 0, points = 0, edges = 0, outliers = 0, lines = 0, line_outliers = 0, depth_priors = 0;

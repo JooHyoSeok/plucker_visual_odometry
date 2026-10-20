@@ -32,6 +32,7 @@
 #include <string>
 #include <thread>
 
+#include "vo_plucker/optimizer.h"
 #include "vo_plucker/tracker.h"
 
 namespace vp {
@@ -125,6 +126,7 @@ struct LoopParams {
   bool da3_adaptive = false;  // DA3 잡음을 성숙한 점에서 온라인 추정 -> 앵커 / BA prior σ 를 그만큼 (실내처럼 DA3 가 덜 정확하면 약하게)
   double anchor_min_dev = 0;  // 지난 앵커 PGO 뒤 앵커들의 |log(a_k/a_ref)| 중앙값이 이보다 작으면 PGO 생략 (스케일이 맞음)
   int odom_refresh = 0;       // PGO 마다 마지막 이만큼의 키프레임 쌍 오도메트리를 지금 포즈로 다시 (보관 뒤 local BA 가 바꾼 것 반영)
+  bool vp_pgo = false;         // (ba_vp_sigma) PGO 에도 구조 방향 (방향은 자유 정점): 루프 양쪽이 본 같은 방향이 루프 회전을 검증
   double odom_sigma_t = 0.02, odom_sigma_s = 0.02;  // PGO 오도메트리 엣지 이동 [VO 단위] / log 스케일 표준편차
 };
 
@@ -166,7 +168,8 @@ class LoopCloser {
   void add_da3_lines(const KFState& st, double a_k);  // (--da3-lines) DA3 깊이로 선분에서 바로 Plücker 라인  // DA3 루프 / 앵커 있음 / 없음
   void blocked(double ms) { ms_blocked += ms, ms_blocked_max = std::max(ms_blocked_max, ms); }
   KFState snapshot(int kf) const;
-  std::unordered_map<int, Sim3> pgo(const std::vector<Pose>& P, const std::vector<int>& sub, double& cost);
+  std::unordered_map<int, Sim3> pgo(const std::vector<Pose>& P, const std::vector<int>& sub, double& cost,
+                                    const std::vector<DirObs>& dobs = {}, const std::vector<Vec3>& dirs = {});
   void correct(const std::unordered_map<int, Sim3>& S_kf, const std::vector<int>& sub);
 
   VOTracker& vo_;

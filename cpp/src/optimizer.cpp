@@ -172,7 +172,7 @@ class EdgeVP : public g2o::BaseUnaryEdge<1, double, g2o::VertexSE3Expmap> {
 }  // namespace
 
 // 구조 방향을 관측 전체 (지금 포즈) 로 다시 추정: v = argmin sum (n^T R v)^2 = sum (R^T n)(R^T n)^T 의 최소 고유 벡터
-static void refine_dirs(VOTracker& vo) {
+void refine_dirs(VOTracker& vo) {
   std::vector<Mat3> S(vo.dirs.size(), Mat3::Zero());
   std::vector<int> cnt(vo.dirs.size(), 0);
   for (const auto& [f, a] : vo.dir_obs) {
@@ -187,6 +187,37 @@ static void refine_dirs(VOTracker& vo) {
       const Vec3 v = Eigen::SelfAdjointEigenSolver<Mat3>(S[j]).eigenvectors().col(0);
       vo.dirs[j] = v.dot(vo.dirs[j]) < 0 ? Vec3(-v) : v;
     }
+}
+
+std::vector<DirObs> dir_summaries(const VOTracker& vo, const std::vector<int>& kfs) {
+  std::vector<DirObs> out;
+  const double sg2 = vo.prm.ba_vp_sigma * vo.prm.ba_vp_sigma;
+  for (int f : kfs) {
+    const auto it = vo.dir_obs.find(f);
+    if (it == vo.dir_obs.end()) continue;
+    std::map<int, std::vector<int>> by;  // 방향 -> 선분 번호
+    for (const auto& [i, j] : it->second) by[j].push_back(i);
+    for (const auto& [j, segs] : by) {
+      if (segs.size() < 2) continue;
+      Mat3 S0 = Mat3::Zero();
+      for (int i : segs) {
+        const Vec3 n = seg_normal(vo.cam, vo.obs[f].seg[i]);
+        S0 += n * n.transpose();
+      }
+      const Vec3 x0 = Eigen::SelfAdjointEigenSolver<Mat3>(S0).eigenvectors().col(0);  // 이 키프레임 선분들만의 방향
+      Mat3 S = Mat3::Zero();
+      for (int i : segs) {
+        const Vec4& sg = vo.obs[f].seg[i];
+        const Vec3 n = seg_normal(vo.cam, sg);
+        constexpr double e = 1e-4;  // d(px 잔차) / d(n.x): x 를 평면 밖 (n 방향) 으로 조금 움직여 중앙 차분
+        const double g = (vp_dist(sg, vo.cam.K * (x0 + e * n).normalized()) - vp_dist(sg, vo.cam.K * (x0 - e * n).normalized())) / (2 * e);
+        S += (g * g / sg2) * n * n.transpose();
+      }
+      const Eigen::SelfAdjointEigenSolver<Mat3> es(S);
+      out.push_back({f, j, es.eigenvectors().col(2), es.eigenvectors().col(1), es.eigenvalues()(2), es.eigenvalues()(1)});
+    }
+  }
+  return out;
 }
 
 Pose hybrid_ba(const Camera& c, const Pose& init, const MapObs& m, const Pose& prev,

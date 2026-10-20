@@ -60,7 +60,7 @@ static const char* kValueOpts[] = {"--video", "--gt", "--calib", "--traj", "--da
                                    "--stride", "--resize", "--traj-online", "--dump-map", "--snapshot", "--loop-pr", "--loop-ver",
                                    "--loop-python", "--da3-range", "--da3-model", "--ba-line-prior", "--ba-vp", "--depth", "--depth-conf", "--depth-conf-min", "--depth-max",
                                    "--depth-scale"};
-static const char* kFlagOpts[] = {"--no-loop", "--no-da3", "--no-viewer", "--autostart", "--sync", "--no-lines", "--ba-lines", "--ba-line-nowrite"};
+static const char* kFlagOpts[] = {"--no-loop", "--no-da3", "--no-viewer", "--autostart", "--sync", "--no-lines", "--ba-lines", "--ba-line-nowrite", "--pgo-vp"};
 
 static bool known_args(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
@@ -226,6 +226,7 @@ int main(int argc, char** argv) {
   lprm.anchor_min_dev = 0.05;  // 최근 앵커 스케일 편차가 이보다 작으면 앵커 PGO 생략
   lprm.odom_refresh = 20;      // PGO 오도메트리: 최근 20 쌍은 지금 (local BA 뒤) 포즈로
   lprm.odom_sigma_s = 0.005;   // 이웃 키프레임 상대 스케일을 단단하게 (앵커 잡음이 창 스케일을 흔들지 못하게)
+  lprm.vp_pgo = flag(argc, argv, "--pgo-vp");  // 실험 (--ba-vp 와 같이): PGO 에도 구조 방향
   // DA3 깊이 범위 [m]: --da3-range 가 없으면 첫 프레임 DA3 깊이 중앙값으로 실내 0.5-20 / 실외 3-40 (KITTI 19-38 m, EuRoC 1.6-3.1 m)
   const char* da3_range = arg(argc, argv, "--da3-range", nullptr);
   double zmin = 3, zmax = 40;

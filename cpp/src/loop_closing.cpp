@@ -55,6 +55,30 @@ class EdgeScalePrior : public g2o::BaseUnaryEdge<1, double, g2o::VertexSim3Expma
   bool write(std::ostream&) const override { return false; }
 };
 
+// (vp_pgo) 구조 방향 정점: 세계 단위 벡터, 2-DoF (지금 방향에 수직인 두 축으로 갱신)
+class VertexDir : public g2o::BaseVertex<2, Vec3> {
+ public:
+  void setToOriginImpl() override { _estimate = Vec3::UnitZ(); }
+  void oplusImpl(const double* u) override {
+    const Vec3 a = _estimate.unitOrthogonal(), b = _estimate.cross(a);
+    _estimate = (_estimate + u[0] * a + u[1] * b).normalized();
+  }
+  bool read(std::istream&) override { return false; }
+  bool write(std::ostream&) const override { return false; }
+};
+// 키프레임 Sim(3) 회전으로 본 방향 x = R v 가 그 키프레임 선분들의 방향과 같게: (b1.x, b2.x) = 0 (DirObs). 수치 Jacobian
+class EdgeDirSim3 : public g2o::BaseBinaryEdge<2, Vec2, VertexDir, g2o::VertexSim3Expmap> {
+ public:
+  Vec3 b1, b2;
+  void computeError() override {
+    const Vec3 x = static_cast<const g2o::VertexSim3Expmap*>(_vertices[1])->estimate().rotation() *
+                   static_cast<const VertexDir*>(_vertices[0])->estimate();
+    _error << b1.dot(x), b2.dot(x);
+  }
+  bool read(std::istream&) override { return false; }
+  bool write(std::ostream&) const override { return false; }
+};
+
 cv::Mat to_gray(const cv::Mat& img) {
   if (img.channels() == 1) return img;
   cv::Mat g;
@@ -818,10 +842,13 @@ void LoopCloser::process(int kf, const cv::Mat& img, bool depth) {
   const int upto = best ? a : kf;  // 루프: 키프레임 a 까지, 앵커만: 지금 키프레임까지
   std::vector<int> sub(kfs_.begin(), std::find(kfs_.begin(), kfs_.end(), upto) + 1);
   std::vector<Pose> P;  // PGO 초기값 (옛 키프레임 포즈는 루프 스레드만 바꾸므로 써넣을 때까지 그대로)
+  std::vector<DirObs> dobs;  // (vp_pgo) 구조 방향 관측 요약 + 지금 방향
+  std::vector<Vec3> dirs;
   {
     auto l = take_map();
     const auto tb = Clock::now();
     for (int f : sub) P.push_back(vo_.poses[f]);
+    if (prm_.vp_pgo && vo_.prm.ba_vp_sigma > 0) dobs = dir_summaries(vo_, sub), dirs = vo_.dirs;
     blocked(ms_since(tb));
   }
   // 새 루프 엣지를 지금 포즈로 평가 (EdgeSim3 와 같은 error). 이미 맞으면 엣지만 남기고 PGO 생략 -
@@ -842,7 +869,7 @@ void LoopCloser::process(int kf, const cv::Mat& img, bool depth) {
     return;
   }
   double cost = 0;
-  const auto S_kf = pgo(P, sub, cost);  // lock 없이: 트래킹은 계속
+  const auto S_kf = pgo(P, sub, cost, dobs, dirs);  // lock 없이: 트래킹은 계속
   since_pgo_ = 0;
   if (!best) ++n_anchor_pgo;
   // PGO 뒤에도 새 루프 엣지가 크게 안 맞으면 (오도메트리 + 앵커와 모순) 잘못된 루프 -> 보정 안 하고 엣지 제거.
@@ -897,7 +924,8 @@ void LoopCloser::process(int kf, const cv::Mat& img, bool depth) {
   ms_pgo += ms_since(t0);
 }
 
-std::unordered_map<int, Sim3> LoopCloser::pgo(const std::vector<Pose>& P, const std::vector<int>& sub, double& cost) {
+std::unordered_map<int, Sim3> LoopCloser::pgo(const std::vector<Pose>& P, const std::vector<int>& sub, double& cost,
+                                              const std::vector<DirObs>& dobs, const std::vector<Vec3>& dirs) {
   // 정점 = 키프레임 Sim(3) (world -> cam), 초기값 = P (sub 순서). 엣지 = 보관된 측정 (없는 오도메트리는 P 로)
   auto pose_sim3 = [&](size_t n) { return Sim3{1.0, P[n].R, P[n].t}; };
   for (size_t n = 0; n + 1 < sub.size(); ++n)
@@ -905,10 +933,15 @@ std::unordered_map<int, Sim3> LoopCloser::pgo(const std::vector<Pose>& P, const 
 
   // ORB-SLAM3 essential graph 와 같은 설정: Sim(3) 정점뿐이라 고정 7x7 블록 (BlockSolverX 보다 반복당 ~2.4배 빠름),
   // lambda 1e-16 (거의 Gauss-Newton 으로 시작), 20회. 같은 그래프에서 30회 X 솔버와 같은 cost 로 수렴 (00, 06 확인)
-  using Block = g2o::BlockSolver_7_3;
   g2o::SparseOptimizer opt;
-  auto* lm = new g2o::OptimizationAlgorithmLevenberg(
-      std::make_unique<Block>(std::make_unique<g2o::LinearSolverEigen<Block::PoseMatrixType>>()));
+  g2o::OptimizationAlgorithmLevenberg* lm;
+  if (dobs.empty()) {
+    using Block = g2o::BlockSolver_7_3;
+    lm = new g2o::OptimizationAlgorithmLevenberg(std::make_unique<Block>(std::make_unique<g2o::LinearSolverEigen<Block::PoseMatrixType>>()));
+  } else {  // 구조 방향 정점 (2-DoF) 이 섞임 -> 동적 블록
+    using Block = g2o::BlockSolverX;
+    lm = new g2o::OptimizationAlgorithmLevenberg(std::make_unique<Block>(std::make_unique<g2o::LinearSolverEigen<Block::PoseMatrixType>>()));
+  }
   lm->setUserLambdaInit(1e-16);
   opt.setAlgorithm(lm);
   std::unordered_map<int, g2o::VertexSim3Expmap*> v;
@@ -945,6 +978,29 @@ std::unordered_map<int, Sim3> LoopCloser::pgo(const std::vector<Pose>& P, const 
         e->setRobustKernel(rk);
         opt.addEdge(e);
       }
+  if (!dobs.empty()) {  // 구조 방향: 방향은 자유 (루프 양쪽 관측이 서로 맞아야), 키프레임 회전에 묶음
+    std::unordered_map<int, VertexDir*> vd;
+    for (const DirObs& o : dobs) {
+      if (!v.count(o.f)) continue;
+      auto it = vd.find(o.j);
+      if (it == vd.end()) {
+        auto* d = new VertexDir();
+        d->setId(int(sub.size() + vd.size()));
+        d->setEstimate(dirs[o.j]);
+        opt.addVertex(d);
+        it = vd.emplace(o.j, d).first;
+      }
+      auto* e = new EdgeDirSim3();
+      e->setVertex(0, it->second);
+      e->setVertex(1, v[o.f]);
+      e->b1 = o.b1, e->b2 = o.b2;
+      e->setInformation(Eigen::Vector2d(o.l1, o.l2).asDiagonal());
+      auto* rk = new g2o::RobustKernelHuber();
+      rk->setDelta(std::sqrt(5.991));
+      e->setRobustKernel(rk);
+      opt.addEdge(e);
+    }
+  }
   opt.initializeOptimization();
   const auto t0 = Clock::now();
   opt.optimize(20);
@@ -1069,6 +1125,7 @@ void LoopCloser::correct(const std::unordered_map<int, Sim3>& S_kf, const std::v
     if (it != kfs_.end()) M = rescale(M, a, *it);
   }
   for (auto& e : edges_) e.S = rescale(e.S, e.j, e.i);
+  if (vo.prm.ba_vp_sigma > 0) refine_dirs(vo);  // 구조 방향도 보정된 포즈로 (안 하면 다음 local BA 가 보정 전 방향에 배정 / 제약)
 }
 
 }  // namespace vp
