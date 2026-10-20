@@ -84,9 +84,11 @@ struct TrackerParams {
   bool ba_lines = false;      // local BA 에 라인도 (orthonormal 4-DoF, 해석 Jacobian)
   bool depth_init = false;    // 깊이가 붙은 첫 프레임 하나로 초기화 (점은 고정 안 함, 시차가 생기면 삼각측량으로 교체), 그 뒤 단안
   bool ba_mature_only = false; // local BA 에 성숙한 점만
+  bool track_mature = false;  // 성숙한 랜드마크가 40개 이상이면 매 프레임 그것만으로 6-DoF (ORB-SLAM TrackLocalMap 처럼)
   bool da3_lines = false;     // 키프레임 선분을 DA3 깊이로 바로 Plücker 라인 (진행 방향 퇴화 라인 포함), 평면 각 mature_deg 넘으면 삼각측량으로
   bool da3_points = false;    // 키프레임에서 시차가 작은 트랙을 DA3 깊이로 맵 점 (pseudo RGB-D), 시차 mature_deg 넘으면 삼각측량으로
   double ba_depth_sigma = 0;  // local BA 에 DA3 점 깊이 prior (log 깊이 표준편차, 0 = 끔. --depth-prior da3 의 앵커 깊이 사용)
+  bool ba_drop_obs = false;   // local BA 이상치: 안 맞는 관측만 빼고 (ORB-SLAM), 좋은 관측이 2개 미만인 점만 맵에서 제거
   bool keyframes = false;     // 매핑과 상관없이 키프레임 목록 유지 (루프 클로저용)
 };
 
@@ -122,9 +124,13 @@ class VOTracker {
   // DA3 앵커 때 루프 스레드가 map lock 아래 기록: 키프레임 -> (맵 점 id, DA3 깊이 [m]), da3_ref = 기준 VO 단위/미터 (0 = 아직)
   std::unordered_map<int, std::vector<std::pair<int, float>>> da3;
   double da3_ref = 0;
+  double da3_sigma = 0;  // (da3_adaptive) 온라인 추정으로 정한 BA DA3 prior σ (0 = prm.ba_depth_sigma)
   std::unordered_set<int> da3_p, da3_l;  // (--da3-points) DA3 깊이로 만든 맵 점: 삼각측량은 시차가 mature_deg 를 넘을 때만 바꿈
+  std::unordered_set<long long> bad_obs;  // (ba_drop_obs) BA 가 뺀 점 관측 obs_key(프레임, 점 id): 그 뒤 BA / 삼각측량에서 안 씀
+  static long long obs_key(int f, int j) { return (long long)f << 32 | unsigned(j); }
   int n_still = 0;       // 정지로 판정한 프레임 수
   int n_map6dof = 0;     // parallax가 작아서 맵 기준 6-DoF로 추정한 프레임 수
+  int n_track_mature = 0;  // --track-mature 로 성숙한 랜드마크 6-DoF 로 푼 프레임 수
   int n_rescued = 0;     // 2D-2D 포즈가 맵과 안 맞아서 맵 기준 6-DoF 로 다시 푼 프레임 수 (안 그러면 추적 실패)
   long n_depth_pts = 0;  // 깊이로 만든 맵 점 수
   int n_ba = 0;          // local BA 실행 수

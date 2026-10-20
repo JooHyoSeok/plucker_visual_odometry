@@ -5,6 +5,7 @@
 #pragma once
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/features2d.hpp>
 #include <opencv2/ximgproc/fast_line_detector.hpp>
 
 #include "vo_plucker/tracker.h"
@@ -20,6 +21,10 @@ struct FrontendParams {
   int reattach_frames = 30;
   double reattach_px = 20;
   bool fld = false;  // 선 검출을 LSD 대신 ximgproc FastLineDetector 로 (빠름)
+  // 맵 재사용 (reuse): reuse_every 프레임마다 ORB 디스크립터로 최근 reuse_frames 안에 본 (지금 트랙 없는) 맵 점을 다시 찾음
+  int reuse_every = 0;      // 0 = 끔
+  int reuse_frames = 300;
+  double reuse_px = 15;     // 예측 투영 위치에서 이 안의 키포인트만
 };
 
 class Frontend {
@@ -32,6 +37,10 @@ class Frontend {
   // step() 직후, vo.add() 전에 호출. 반환: 붙인 점 수
   int reattach(const Camera& cam, const VOTracker& vo, const Pose& pred, FrameObs& o);
   void drop(const std::vector<int>& ids);  // 점 트랙 제거 (동적 물체 등)
+  // 맵 재사용 (ORB-SLAM SearchByProjection, 디스크립터로): 지금 추적 중인 맵 점의 ORB 디스크립터를 갱신하고, 최근 본 맵 점 중
+  // 트랙이 끊긴 것을 예측 포즈로 투영 -> 근처 ORB 키포인트와 Hamming 매칭 (비율 검사, 1:1) -> 그 자리 새 트랙을 옛 점 id 로 /
+  // 새 관측으로 추가. 재방문 때 새 점을 만들지 않고 옛 맵을 씀. reattach 다음에 호출. 반환: 다시 붙인 점 수
+  int reuse(const Camera& cam, const VOTracker& vo, const Pose& pred, FrameObs& o);
 
   FrontendParams prm;
   std::vector<cv::Point2f> pts;  // current point tracks
@@ -43,6 +52,8 @@ class Frontend {
  private:
   cv::Ptr<cv::LineSegmentDetector> lsd_;
   cv::Ptr<cv::ximgproc::FastLineDetector> fld_;
+  cv::Ptr<cv::ORB> orb_;
+  std::unordered_map<int, cv::Mat> desc_;  // 맵 점 id -> 마지막으로 본 자리의 ORB 디스크립터 (upright)
   cv::Mat prev_;
   std::vector<std::vector<cv::Mat>> hist_;  // 최근 reattach_frames+1 장의 KLT 피라미드 (back() = 현재 프레임)
   int k_ = -1;                 // 현재 프레임 번호

@@ -189,7 +189,7 @@ struct LocalBAProblem {
   std::unordered_map<int, g2o::VertexSE3Expmap*> vk;
   std::unordered_map<int, g2o::SE3Quat> pose0;  // build 때 포즈 / 점 (BA 전 오차 계산용)
   std::unordered_map<int, Vec3> X0;
-  struct Obs { g2o::EdgeSE3ProjectXYZ* e; int j; };
+  struct Obs { g2o::EdgeSE3ProjectXYZ* e; int j, f; };
   struct LObs { EdgeLineProjection* e; int j; };
   std::vector<Obs> edges;
   std::vector<LObs> ledges;
@@ -258,7 +258,7 @@ LocalBAPtr local_ba_build(const VOTracker& vo, int window, int max_fixed, bool l
   for (int j : pts) {
     std::vector<std::pair<int, const Vec2*>> seen;  // (키프레임, 관측)
     for (auto& [f, v] : vk)
-      if (const Vec2* u = vo.obs[f].point(j)) seen.emplace_back(f, u);
+      if (const Vec2* u = vo.obs[f].point(j); u && !vo.bad_obs.count(VOTracker::obs_key(f, j))) seen.emplace_back(f, u);
     if (seen.size() < 2) continue;
     auto* p = new g2o::VertexPointXYZ();
     p->setId(next_id++);
@@ -278,7 +278,7 @@ LocalBAPtr local_ba_build(const VOTracker& vo, int window, int max_fixed, bool l
       e->setRobustKernel(rk);
       e->fx = vo.cam.fx, e->fy = vo.cam.fy, e->cx = vo.cam.cx, e->cy = vo.cam.cy;
       opt.addEdge(e);
-      P->edges.push_back({e, j});
+      P->edges.push_back({e, j, f});
     }
   }
   // DA3 깊이 prior: 키프레임이 보는 점의 깊이 = da3_ref x DA3 깊이 (BA 가 창의 스케일을 흘리지 못하게)
@@ -291,7 +291,8 @@ LocalBAPtr local_ba_build(const VOTracker& vo, int window, int max_fixed, bool l
             e->setVertex(0, p->second);
             e->setVertex(1, v);
             e->setMeasurement(std::log(vo.da3_ref * z));
-            e->setInformation(Eigen::Matrix<double, 1, 1>::Constant(1 / (vo.prm.ba_depth_sigma * vo.prm.ba_depth_sigma)));
+            const double sg = vo.da3_sigma > 0 ? vo.da3_sigma : vo.prm.ba_depth_sigma;
+            e->setInformation(Eigen::Matrix<double, 1, 1>::Constant(1 / (sg * sg)));
             auto* rk = new g2o::RobustKernelHuber();
             rk->setDelta(std::sqrt(3.841));  // 1 DoF 95 %
             e->setRobustKernel(rk);
@@ -397,10 +398,18 @@ LocalBAStats local_ba_apply(VOTracker& vo, LocalBAProblem& P) {
     vo.poses[f] = Pose{T.rotation().toRotationMatrix(), T.translation()};
   }
   std::unordered_set<int> bad;
+  std::unordered_map<int, int> good;
   for (auto& o : P.edges) {
     o.e->computeError();
-    if (o.e->chi2() > kBaChi2 || !o.e->isDepthPositive()) bad.insert(o.j);
+    if (o.e->chi2() > kBaChi2 || !o.e->isDepthPositive()) {
+      bad.insert(o.j);
+      if (vo.prm.ba_drop_obs) vo.bad_obs.insert(VOTracker::obs_key(o.f, o.j));
+    } else {
+      ++good[o.j];
+    }
   }
+  if (vo.prm.ba_drop_obs)  // 나쁜 관측만 뺐으니 좋은 관측이 2개 이상 남은 점은 유지
+    for (auto it = bad.begin(); it != bad.end();) it = good[*it] >= 2 ? bad.erase(it) : std::next(it);
   for (auto& [j, p] : P.vp) {
     if (!vo.map_p.count(j)) continue;
     if (bad.count(j)) {

@@ -50,6 +50,7 @@ struct LoopEdge {
   Sim3 S;              // cam_j -> cam_i (VO units of each keyframe)
   int inliers = 0;
   bool da3 = false;    // DA3 깊이 3D 로 구한 Sim(3): 스케일은 앵커와 같은 정보 -> PGO 에서 약하게
+  Eigen::Matrix<double, 7, 7> H = Eigen::Matrix<double, 7, 7>::Zero();  // 재투영 정제의 헤시안 ([w u s], 1 px 잡음), 0 = 없음
 };
 
 class PlaceRecognizer {
@@ -71,6 +72,7 @@ struct KFState {
   double da3_scale = 0;   // 이 키프레임의 DA3 앵커 (VO 단위/미터, 0 = 없음)
   std::vector<Vec2> new_uv;  // (--da3-points) 아직 성숙한 맵 점이 없는 트랙의 픽셀 / id -> DA3 깊이로 맵 점
   std::vector<int> new_pid;
+  std::vector<char> mature;   // uvd 와 같은 순서: 성숙한 맵 점인지 (DA3 잡음 추정용)
   std::vector<Vec4> new_seg;  // (--da3-lines) 아직 성숙한 맵 라인이 없는 선분 / id -> DA3 깊이로 Plücker 라인
   std::vector<int> new_lid;
 };
@@ -87,7 +89,8 @@ class LoopVerifier {
 std::unique_ptr<PlaceRecognizer> make_thumbnail_recognizer();
 struct LoopServer;
 // min_f: F-RANSAC 인라이어 최소. da3: 있으면 로컬 3D 로 Sim(3) 가 안 될 때 ORB 키포인트의 DA3 깊이 3D 로 다시 (앵커 키프레임만)
-std::unique_ptr<LoopVerifier> make_orb_verifier(const Camera& cam, int min_f = 80, std::shared_ptr<LoopServer> da3 = nullptr);
+std::unique_ptr<LoopVerifier> make_orb_verifier(const Camera& cam, int min_f = 80, std::shared_ptr<LoopServer> da3 = nullptr,
+                                                bool refine = true);  // refine: 양방향 재투영 Sim(3) 정제
 
 // Python 플러그인 서버 (stdin/stdout 줄 프로토콜, python/loop_server.py 참고). 한 프로세스를 후보 검색과 검증이 공유
 struct LoopServer;
@@ -116,7 +119,10 @@ struct LoopParams {
   int fuse_nb = 2;            //   옛 키프레임 j 앞뒤로 이만큼의 키프레임까지 융합
   int anchor_every = 10;      // metric depth 앵커: 이 키프레임 수마다 (루프 없이도) PGO
   double anchor_sigma = 0.08; // 앵커 log-scale 표준편차 (DA3 프레임 간 흔들림 ~6 %)
+  bool da3_adaptive = false;  // DA3 잡음을 성숙한 점에서 온라인 추정 -> 앵커 / BA prior σ 를 그만큼 (실내처럼 DA3 가 덜 정확하면 약하게)
   double anchor_min_dev = 0;  // 지난 앵커 PGO 뒤 앵커들의 |log(a_k/a_ref)| 중앙값이 이보다 작으면 PGO 생략 (스케일이 맞음)
+  int odom_refresh = 0;       // PGO 마다 마지막 이만큼의 키프레임 쌍 오도메트리를 지금 포즈로 다시 (보관 뒤 local BA 가 바꾼 것 반영)
+  double odom_sigma_t = 0.02, odom_sigma_s = 0.02;  // PGO 오도메트리 엣지 이동 [VO 단위] / log 스케일 표준편차
 };
 
 class LoopCloser {
@@ -129,7 +135,9 @@ class LoopCloser {
   void push(int kf, const cv::Mat& img);
   // 남은 큐를 끝까지 처리하고 스레드 종료 (궤적 저장 전에 호출, map lock 은 놓은 상태로)
   void finish();
-  const std::vector<LoopEdge>& loop_edges() const { return edges_; }  // PGO 루프 엣지 (지금 맵 단위), finish() 뒤에
+  const std::vector<LoopEdge>& loop_edges() const { return edges_; }
+  double da3_noise_frame() const { return da3_sig_f_; }  // (da3_adaptive) 추정 DA3 잡음 (log), finish() 뒤에
+  double da3_noise_point() const { return da3_sig_p_; }  // PGO 루프 엣지 (지금 맵 단위), finish() 뒤에
 
   // 아래 통계는 finish() 뒤에 읽기
   std::vector<LoopEdge> loops;  // 검출된 루프 (측정값 원본)
@@ -171,6 +179,8 @@ class LoopCloser {
   std::unordered_map<int, double> anchors_;  // kf -> VO 단위/미터 (그 키프레임 카메라 단위, 보정 때 단위만 맞춤)
   std::vector<double> first_anchors_;
   double a_ref_ = 0;                         // 목표 VO 단위/미터 (처음 10개 앵커 중앙값)
+  std::deque<double> la_hist_, sp_hist_;     // (da3_adaptive) 최근 키프레임의 log a_k / 점별 DA3 상대 잡음 (성숙한 점)
+  double da3_sig_f_ = 0, da3_sig_p_ = 0;     // 추정한 DA3 프레임별 스케일 잡음 / 점별 상대 잡음 (log)
   int since_pgo_ = 0;
   std::vector<LoopEdge> pending_;  // 연속 일관성 확인 중인 검출 (아직 그래프에 안 넣음)
   // 융합 / covisibility (루프 스레드만): 키프레임 맵 점 디스크립터, 트랙 id -> 대표 (가장 옛) 맵 점 id

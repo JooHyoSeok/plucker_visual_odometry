@@ -9,3 +9,4 @@ build_tsan/
 build_diag/
 build_s6/
 build_exp/
+build_w*/

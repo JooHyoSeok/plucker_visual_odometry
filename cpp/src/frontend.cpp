@@ -309,6 +309,82 @@ int Frontend::reattach(const Camera& cam, const VOTracker& vo, const Pose& pred,
   return added;
 }
 
+int Frontend::reuse(const Camera& cam, const VOTracker& vo, const Pose& pred, FrameObs& o) {
+  const int k = k_;
+  if (prm.reuse_every <= 0 || k % prm.reuse_every || int(vo.obs.size()) != k) return 0;
+  if (!orb_) orb_ = cv::ORB::create(1500, 1.2f, 8, 31, 0, 2, cv::ORB::HARRIS_SCORE, 31, 15);
+  auto upright = [](std::vector<cv::KeyPoint>& kp) { for (auto& x : kp) x.angle = -1; };  // 저장 / 질의 모두 같은 방향
+  // 1) 지금 추적 중인 맵 점 자리의 디스크립터 갱신
+  std::vector<cv::KeyPoint> tk;
+  for (size_t i = 0; i < o.pid.size(); ++i)
+    if (vo.map_p.count(o.pid[i])) tk.emplace_back(cv::Point2f(o.uv[i](0), o.uv[i](1)), 31.f, -1.f, 0.f, 0, int(i));
+  cv::Mat td;
+  orb_->compute(prev_, tk, td);
+  for (int r = 0; r < td.rows; ++r) desc_[o.pid[tk[r].class_id]] = td.row(r).clone();
+  // 2) 현재 영상 ORB 키포인트 (격자로)
+  std::vector<cv::KeyPoint> kp;
+  cv::Mat kd;
+  orb_->detect(prev_, kp);
+  upright(kp);
+  orb_->compute(prev_, kp, kd);
+  const float G = 20;
+  auto cell = [&](float x, float y) { return int(y / G) * 100000 + int(x / G); };
+  std::unordered_multimap<int, int> grid;
+  for (size_t q = 0; q < kp.size(); ++q) grid.emplace(cell(kp[q].pt.x, kp[q].pt.y), int(q));
+  // 3) 후보: 최근 본 (트랙 없는) 맵 점 -> 투영 -> 근처 키포인트 Hamming 최소 + 비율
+  std::unordered_map<int, std::pair<int, int>> best_of_kp;  // 키포인트 -> (거리, 후보 id): 1:1
+  for (const auto& [j, d] : desc_) {
+    if (o.point(j)) continue;
+    const auto lp = vo.last_p.find(j);
+    if (lp == vo.last_p.end() || lp->second < k - prm.reuse_frames) continue;
+    const auto X = vo.map_p.find(j);
+    if (X == vo.map_p.end()) continue;
+    const Vec3 c = pred.R * X->second + pred.t;
+    if (c(2) <= 0) continue;
+    const Vec3 q = cam.K * c;
+    const float u = q(0) / q(2), v = q(1) / q(2);
+    if (u < 0 || u >= cam.W || v < 0 || v >= cam.H) continue;
+    int b1 = 256, b2 = 256, bi = -1;
+    const int r = int(std::ceil(prm.reuse_px / G));
+    for (int dy = -r; dy <= r; ++dy)
+      for (int dx = -r; dx <= r; ++dx) {
+        const auto rg = grid.equal_range(cell(u, v) + dy * 100000 + dx);
+        for (auto it = rg.first; it != rg.second; ++it) {
+          const cv::KeyPoint& p = kp[it->second];
+          if (std::hypot(p.pt.x - u, p.pt.y - v) > prm.reuse_px) continue;
+          const int h = cv::norm(d, kd.row(it->second), cv::NORM_HAMMING);
+          if (h < b1) b2 = b1, b1 = h, bi = it->second;
+          else if (h < b2) b2 = h;
+        }
+      }
+    if (bi < 0 || b1 > 50 || b1 > 0.8 * b2) continue;
+    auto [it, fresh] = best_of_kp.emplace(bi, std::make_pair(b1, j));
+    if (!fresh && b1 < it->second.first) it->second = {b1, j};
+  }
+  // 4) 붙이기: 그 자리 (4 px) 에 맵에 없는 새 트랙이 있으면 옛 id 로 합치고, 없으면 새 관측 + 새 트랙
+  const float R = 4;
+  int added = 0;
+  for (const auto& [q, bj] : best_of_kp) {
+    const cv::Point2f p = kp[q].pt;
+    int ni = -1;
+    for (size_t i = 0; i < o.uv.size() && ni < 0; ++i)
+      if (std::hypot(o.uv[i](0) - p.x, o.uv[i](1) - p.y) < R) ni = int(i);
+    if (ni >= 0) {
+      if (vo.map_p.count(o.pid[ni])) continue;  // 이미 다른 맵 점이 추적 중인 자리 (중복 점 융합은 나중)
+      o.pid[ni] = pid[ni] = bj.second;
+    } else {
+      o.pid.push_back(bj.second), o.uv.emplace_back(p.x, p.y), pts.push_back(p), pid.push_back(bj.second);
+    }
+    ++added;
+  }
+  for (auto it = desc_.begin(); it != desc_.end();) {  // 오래 안 본 점은 버림
+    const auto lp = vo.last_p.find(it->first);
+    it = (lp == vo.last_p.end() || lp->second < k - prm.reuse_frames) ? desc_.erase(it) : std::next(it);
+  }
+  if (added) o.index();
+  return added;
+}
+
 Pose robust_init(const Camera& c, const FrameObs& o0, const FrameObs& oI, double dist_thresh) {
   std::vector<int> ids;
   for (int j : o0.pid)

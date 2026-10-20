@@ -67,6 +67,15 @@ cpp/build/run_vo --video dataset/sequences/00/image_2/%06d.png --gt dataset/pose
   segment -> robust fit to DA3 depth, also lines parallel to the motion that cannot be triangulated), `--da3-points` (DA3
   depth for keyframe tracks without enough parallax), `--da3-range MIN,MAX` (DA3 depth used, indoor 0.5,20),
   `--realtime HZ` (feed frames at camera rate), `--fld` (FastLineDetector instead of LSD).
+- KITTI + EuRoC (PROGRESS.md section 12): `--ba-drop-obs` (local BA drops only the observations that do not fit and removes a
+  point only when fewer than 2 good ones remain; before, one bad observation deleted the whole point, and after the PGO
+  corrections whole BA windows were wiped, which lost tracking on EuRoC MH_01), `--pgo-odom-refresh 20 --pgo-odom-sigma 0.02,0.005`
+  (PGO odometry re-read from the BA-refined poses, stiffer relative scale), `--reuse-every 5` (map reuse: ORB projection
+  search re-identifies old map points). Best on both datasets (KITTI 06/07/10 3.14 / 1.40 / 4.96 m, EuRoC MH_01 / V1_01 /
+  V2_01 0.28 / 0.25 / 0.13 m): `--depth-prior da3 --loop --kf-parallax 25 --local-ba --ba-depth-prior 0.3 --loop-da3-3d
+  --loop-min-f 40 --da3-lines --final-gba --ba-drop-obs --pgo-odom-refresh 20 --pgo-odom-sigma 0.02,0.005 --reuse-every 5
+  --loop-python <py>` (EuRoC: add `--da3-range 0.5,20`; `--loop-sync --ba-sync` for deterministic runs).
+  `--da3-cache DIR` keeps the DA3 depth maps (same result every run, no GPU; fill it with `cpp/tools/da3_cache.py`).
 - Options (off by default, mixed results per sequence, see PROGRESS.md section 9): `--hybrid --hybrid-fix-rot` (translation
   refined by map + epipolar), `--loop-consist N --loop-prune R` (loop consistency / outlier edges), `--loop-fuse` (map point
   fusion + covisibility candidate exclusion), `--local-ba [--ba-lines]` (keyframe BA in a LocalMapping thread, Plücker lines in

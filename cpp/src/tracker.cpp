@@ -160,7 +160,9 @@ void VOTracker::update_map(int k) {
     return true;
   };
   for (int j : o.pid) {
-    if (mature_p.count(j) || !frames_for(first_p.at(j), [&](int f) { return obs[f].point(j) != nullptr; })) continue;
+    if (mature_p.count(j) ||
+        !frames_for(first_p.at(j), [&](int f) { return obs[f].point(j) != nullptr && !bad_obs.count(obs_key(f, j)); }))
+      continue;
     P.clear();
     std::vector<Vec2> uvs;
     for (int f : fr) P.push_back(poses[f]), uvs.push_back(*obs[f].point(j));
@@ -278,6 +280,17 @@ bool VOTracker::track(int k) {
   };
 
   Pose p1 = solve(m, p0);
+  // --track-mature (ORB-SLAM TrackLocalMap 처럼): 성숙한 (시차 충분 / local BA 가 정제한) 랜드마크가 충분하면 위 포즈에서
+  // 그것만으로 매 프레임 6-DoF 로 다시 맞춤 -> 프레임 간 (2D-2D) 오차가 쌓이지 않음. 미성숙 / DA3 점은 포즈에 안 쓰고 컬링 / 매핑만
+  MapObs mm;
+  if (prm.track_mature) {
+    for (size_t i = 0; i < pid.size(); ++i)
+      if (mature_p.count(pid[i])) mm.X.push_back(m.X[i]), mm.uv.push_back(m.uv[i]);
+    for (size_t i = 0; i < lid.size(); ++i)
+      if (mature_l.count(lid[i])) mm.L.push_back(m.L[i]), mm.seg.push_back(m.seg[i]);
+  }
+  const bool use_mature = prm.track_mature && mm.X.size() >= 40;
+  if (use_mature) p1 = prm.pose_g2o ? motion_only_ba(cam, p1, mm) : estimate_pose(cam, p1, mm), rit = rel.end(), ++n_track_mature;
   // outlier culling: 이 프레임에서 크게 안 맞는 랜드마크는 맵에서 빼고(다시 삼각측량 대상) 포즈 재추정
   VecX r = residuals(cam, p1, m);
   const int np_ = pid.size();
@@ -294,11 +307,12 @@ bool VOTracker::track(int k) {
     const VecX rq = residuals(cam, q, m);
     if (rq.allFinite() && n_inliers(rq) > n_inliers(r)) p1 = q, r = rq, rit = rel.end(), ++n_rescued;
   }
-  MapObs kept;
+  MapObs kept, kept_m;  // kept_m: 그중 성숙한 것 (use_mature 일 때 재추정용)
   bool culled = false;
   for (int i = 0; i < np_; ++i) {
     if (r.segment<2>(2 * i).norm() < prm.outlier_px) {
       kept.X.push_back(m.X[i]), kept.uv.push_back(m.uv[i]);
+      if (use_mature && mature_p.count(pid[i])) kept_m.X.push_back(m.X[i]), kept_m.uv.push_back(m.uv[i]);
     } else {
       map_p.erase(pid[i]), mature_p.erase(pid[i]), culled = true;
     }
@@ -307,12 +321,13 @@ bool VOTracker::track(int k) {
     const double e = std::max(std::abs(r(2 * np_ + 2 * i)), std::abs(r(2 * np_ + 2 * i + 1)));
     if (e < prm.outlier_px) {
       kept.L.push_back(m.L[i]), kept.seg.push_back(m.seg[i]);
+      if (use_mature && mature_l.count(lid[i])) kept_m.L.push_back(m.L[i]), kept_m.seg.push_back(m.seg[i]);
     } else {
       map_l.erase(lid[i]), mature_l.erase(lid[i]), culled = true;
     }
   }
   if (kept.X.size() + kept.L.size() < 6) return fail(k, "almost all map correspondences are outliers");  // 맵이 거의 다 안 맞음 -> 실패
-  if (culled) p1 = solve(kept, p1);
+  if (culled) p1 = solve(use_mature && kept_m.X.size() >= 20 ? kept_m : kept, p1);
   const double rel_deg = rit != rel.end() ? std::acos(std::clamp((rit->second.R.trace() - 1) / 2, -1.0, 1.0)) * 180 / M_PI : 0;
   if (prm.hybrid && rit != rel.end() && has_pose[k - 1] && rel_deg >= prm.hybrid_min_deg) {  // 2D-2D 회전/방향을 맵 + epipolar 로 함께 정제
     std::vector<std::pair<Vec2, Vec2>> tr;

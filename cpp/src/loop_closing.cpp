@@ -7,6 +7,7 @@
 #include <g2o/core/sparse_optimizer.h>
 #include <g2o/solvers/eigen/linear_solver_eigen.h>
 #include <g2o/types/sim3/types_seven_dof_expmap.h>
+#include <g2o/types/slam3d/vertex_pointxyz.h>
 
 #include <algorithm>
 #include <chrono>
@@ -36,13 +37,13 @@ Eigen::Matrix<double, 7, 7> info(double r, double t, double s) {
   I(6, 6) = 1 / (s * s);
   return I;
 }
-const Eigen::Matrix<double, 7, 7> kInfoOdom = info(0.005, 0.02, 0.02), kInfoLoop = info(0.01, 0.05, 0.05);
+const Eigen::Matrix<double, 7, 7> kInfoLoop = info(0.01, 0.05, 0.05);
 // DA3 깊이 3D 루프: 스케일 a_i/a_j 는 DA3 앵커 엣지와 같은 정보 (이중 계산 X), 이동은 깊이 잡음 (~6 % x 거리) 만큼 덜 믿음
 const Eigen::Matrix<double, 7, 7> kInfoLoopDa3 = info(0.01, 0.1, 1.0);
 // DA3 앵커가 있으면 메트릭 스케일은 앵커가 줌 -> 모든 루프 엣지의 스케일은 약하게 (EuRoC V1_01: GT 로 참인 루프의 스케일 비가
 // 0.49-2.87 로 틀려서 PGO 를 비틂). 루프는 회전 / 이동만 고침
 const Eigen::Matrix<double, 7, 7> kInfoLoopAnchored = info(0.01, 0.05, 1.0);
-constexpr double kMaxLoopChi2Post = 1e4;  // PGO 뒤 새 루프 엣지 chi2 가 이보다 크면 잘못된 루프
+constexpr double kMaxLoopChi2Post = 300;  // PGO 뒤 새 루프 엣지 chi2 가 이보다 크면 잘못된 루프 (KITTI 참 루프 최대 254, EuRoC 나쁜 루프 500-8000)
 
 // metric depth 앵커: 키프레임 Sim(3) 정점의 log 스케일 = 측정 (log a_k - log a_ref). Jacobian 은 g2o 수치 미분
 class EdgeScalePrior : public g2o::BaseUnaryEdge<1, double, g2o::VertexSim3Expmap> {
@@ -124,9 +125,9 @@ Sim3 umeyama(const std::vector<Vec3>& A, const std::vector<Vec3>& B) {  // B ≈
 
 class OrbVerifier : public LoopVerifier {
  public:
-  explicit OrbVerifier(const Camera& cam, int min_f = 80, std::shared_ptr<LoopServer> da3 = nullptr)
+  explicit OrbVerifier(const Camera& cam, int min_f = 80, std::shared_ptr<LoopServer> da3 = nullptr, bool refine = true)
       : cam_(cam), orb_(cv::ORB::create(1500, 1.2f, 8, 31, 0, 2, cv::ORB::HARRIS_SCORE, 31, 10)), kMinF(min_f),
-        da3_(std::move(da3)) {}
+        da3_(std::move(da3)), refine_(refine) {}
 
   int add(const KFState& st, const cv::Mat& img) override {
     KF& d = kf_[st.kf];
@@ -234,7 +235,70 @@ class OrbVerifier : public LoopVerifier {
     std::vector<Vec3> A, B;
     for (int m = 0; m < n; ++m)
       if (best_in[m]) A.push_back(Xj[m]), B.push_back(Xi[m]);
-    return LoopEdge{i, j, umeyama(A, B), best};  // 인라이어 전체로 재추정
+    const Sim3 S0 = umeyama(A, B);  // 인라이어 전체로 재추정 (3D-3D)
+    if (!refine_) return LoopEdge{i, j, S0, best};
+    // 양방향 재투영으로 Sim(3) 정제 (ORB-SLAM OptimizeSim3 의 생각): 3D-3D 는 깊이 오차를 그대로 쓰지만, 재투영은 광선 방향
+    // 깊이 오차에 둔감 -> 작은 기선 / DA3 깊이 3D 에서도 회전 / 이동이 맞음. 정제 후 헤시안 = 이 루프 측정의 정보행렬 (H)
+    g2o::SparseOptimizer opt;
+    using Block = g2o::BlockSolverX;
+    opt.setAlgorithm(new g2o::OptimizationAlgorithmLevenberg(
+        std::make_unique<Block>(std::make_unique<g2o::LinearSolverEigen<Block::PoseMatrixType>>())));
+    auto* v = new g2o::VertexSim3Expmap();
+    v->setId(0), v->setEstimate(g2o::Sim3(S0.R, S0.t, S0.s)), v->_fix_scale = false;
+    v->_principle_point1 = v->_principle_point2 = Eigen::Vector2d(cam_.cx, cam_.cy);
+    v->_focal_length1 = v->_focal_length2 = Eigen::Vector2d(cam_.fx, cam_.fy);
+    opt.addVertex(v);
+    std::vector<g2o::OptimizableGraph::Edge*> es;
+    int id = 1;
+    for (int m = 0; m < n; ++m) {
+      if (!best_in[m]) continue;
+      auto* pj = new g2o::VertexPointXYZ();
+      auto* pi = new g2o::VertexPointXYZ();
+      pj->setId(id++), pj->setEstimate(Xj[m]), pj->setFixed(true), opt.addVertex(pj);
+      pi->setId(id++), pi->setEstimate(Xi[m]), pi->setFixed(true), opt.addVertex(pi);
+      auto* e1 = new g2o::EdgeSim3ProjectXYZ();  // j 의 점 -> S -> i 영상
+      e1->setVertex(0, pj), e1->setVertex(1, v), e1->setMeasurement(ui[m]), e1->setInformation(Eigen::Matrix2d::Identity());
+      auto* e2 = new g2o::EdgeInverseSim3ProjectXYZ();  // i 의 점 -> S^-1 -> j 영상
+      e2->setVertex(0, pi), e2->setVertex(1, v), e2->setMeasurement(uj[m]), e2->setInformation(Eigen::Matrix2d::Identity());
+      for (auto* e : {static_cast<g2o::OptimizableGraph::Edge*>(e1), static_cast<g2o::OptimizableGraph::Edge*>(e2)}) {
+        auto* rk = new g2o::RobustKernelHuber();
+        rk->setDelta(std::sqrt(10.0));
+        e->setRobustKernel(rk), opt.addEdge(e), es.push_back(e);
+      }
+    }
+    opt.initializeOptimization();
+    opt.optimize(5);
+    int nin = 0;
+    for (size_t q = 0; q + 1 < es.size(); q += 2) {  // 짝 (e1, e2) 중 하나라도 크면 그 대응을 뺌 (ORB-SLAM: chi2 > 10)
+      es[q]->computeError(), es[q + 1]->computeError();
+      const bool bad = es[q]->chi2() > 10 || es[q + 1]->chi2() > 10;
+      es[q]->setLevel(bad), es[q + 1]->setLevel(bad), nin += !bad;
+    }
+    if (nin < kMinSim3) return std::nullopt;
+    opt.initializeOptimization(0);
+    opt.optimize(5);
+    // 헤시안 (7x7, g2o Sim3 왼쪽 섭동 [w u s] = PGO EdgeSim3 오차와 같은 좌표): 인라이어 재투영 잔차의 수치 Jacobian
+    Eigen::Matrix<double, 7, 7> H = Eigen::Matrix<double, 7, 7>::Zero();
+    std::vector<Eigen::Matrix<double, 2, 7>> J(es.size());
+    for (int k = 0; k < 7; ++k)
+      for (int sgn : {1, -1}) {
+        double d[7] = {0, 0, 0, 0, 0, 0, 0};
+        d[k] = sgn * 1e-6;
+        v->push(), v->oplus(d);
+        for (size_t q = 0; q < es.size(); ++q)
+          if (es[q]->level() == 0) {
+            es[q]->computeError();
+            const Eigen::Map<const Eigen::Vector2d> r(es[q]->errorData());
+            J[q].col(k) += sgn * r / 2e-6;
+          }
+        v->pop();
+      }
+    for (size_t q = 0; q < es.size(); ++q)
+      if (es[q]->level() == 0) H += J[q].transpose() * J[q];
+    const g2o::Sim3 Sr = v->estimate();
+    LoopEdge le{i, j, Sim3{Sr.scale(), Sr.rotation().toRotationMatrix(), Sr.translation()}, nin};
+    le.H = H;
+    return le;
   }
 
   void rescale(int kf, double s) override {
@@ -257,6 +321,7 @@ class OrbVerifier : public LoopVerifier {
   std::mt19937 rng_{0};
   int kMinF;  // F-RANSAC 인라이어 최소 수
   std::shared_ptr<LoopServer> da3_;
+  bool refine_;  // 재투영 Sim(3) 정제 (끄면 3D-3D Umeyama 그대로, 비교용)
 };
 }  // namespace
 
@@ -420,8 +485,8 @@ class PyVerifier : public LoopVerifier {
 }  // namespace
 
 std::unique_ptr<PlaceRecognizer> make_thumbnail_recognizer() { return std::make_unique<ThumbnailRecognizer>(); }
-std::unique_ptr<LoopVerifier> make_orb_verifier(const Camera& cam, int min_f, std::shared_ptr<LoopServer> da3) {
-  return std::make_unique<OrbVerifier>(cam, min_f, std::move(da3));
+std::unique_ptr<LoopVerifier> make_orb_verifier(const Camera& cam, int min_f, std::shared_ptr<LoopServer> da3, bool refine) {
+  return std::make_unique<OrbVerifier>(cam, min_f, std::move(da3), refine);
 }
 std::shared_ptr<LoopServer> start_loop_server(const std::string& cmd) { return std::make_shared<LoopServer>(cmd); }
 std::vector<double> server_depth_at(LoopServer& s, const cv::Mat& img, const std::vector<Vec2>& uv) { return s.depth_at(img, uv); }
@@ -574,8 +639,10 @@ KFState LoopCloser::snapshot(int kf) const {  // map lock 아래에서
       if (const double z = (st.pose.R * it->second + st.pose.t)(2); z > 0)
         d.emplace_back(o.uv[m](0), o.uv[m](1), z), ids.push_back(o.pid[m]);
   // ORB 검증기는 맵 점 전부 (3D 연결), 서버로는 300 개만 보냄
-  for (size_t m = 0, n = std::min<size_t>(3000, d.size()); m < n; ++m)
-    st.uvd.push_back(d[m * d.size() / n]), st.pid.push_back(ids[m * d.size() / n]);
+  for (size_t m = 0, n = std::min<size_t>(3000, d.size()); m < n; ++m) {
+    const int j = ids[m * d.size() / n];
+    st.uvd.push_back(d[m * d.size() / n]), st.pid.push_back(j), st.mature.push_back(vo_.mature_p.count(j) > 0);
+  }
   if (vo_.prm.da3_points)
     for (size_t m = 0; m < o.pid.size(); ++m)
       if (!vo_.mature_p.count(o.pid[m])) st.new_uv.push_back(o.uv[m]), st.new_pid.push_back(o.pid[m]);
@@ -617,6 +684,26 @@ void LoopCloser::process(int kf, const cv::Mat& img, bool depth) {
     if (const auto av = anchor_->anchor(kf, uvd, &z)) {
       anchors_[kf] = *av, ++n_anchors;
       st.da3_scale = *av;
+      if (prm_.da3_adaptive) {  // 성숙한 (삼각측량이 좋은) 점에서 DA3 잡음: 점별 = log(VO/DA3) 의 MAD, 프레임별 = log a_k 변화의 MAD/√2
+        auto med = [](std::vector<double> v) { std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end()); return v[v.size() / 2]; };
+        std::vector<double> lr;
+        for (size_t m = 0; m < z.size(); ++m)
+          if (z[m] > 0 && st.mature[m * st.uvd.size() / z.size()]) lr.push_back(std::log(uvd[m](2) / z[m]));
+        if (lr.size() >= 20) {
+          const double c = med(lr);
+          for (double& x : lr) x = std::abs(x - c);
+          sp_hist_.push_back(1.4826 * med(lr)), la_hist_.push_back(c);
+          if (la_hist_.size() > 30) la_hist_.pop_front(), sp_hist_.pop_front();
+          if (la_hist_.size() >= 5) {
+            std::vector<double> dl;
+            for (size_t q = 1; q < la_hist_.size(); ++q) dl.push_back(la_hist_[q] - la_hist_[q - 1]);
+            const double cd = med(dl);
+            for (double& x : dl) x = std::abs(x - cd);
+            da3_sig_f_ = 1.4826 * med(dl) / std::sqrt(2.0);
+            da3_sig_p_ = med(std::vector<double>(sp_hist_.begin(), sp_hist_.end()));
+          }
+        }
+      }
       if (first_anchors_.size() < 10) {
         first_anchors_.push_back(*av);
         std::vector<double> f = first_anchors_;
@@ -644,6 +731,7 @@ void LoopCloser::process(int kf, const cv::Mat& img, bool depth) {
         const auto tb = Clock::now();
         vo_.da3[kf] = std::move(d);
         vo_.da3_ref = a_ref_;
+        if (prm_.da3_adaptive && da3_sig_p_ > 0) vo_.da3_sigma = std::max(vo_.prm.ba_depth_sigma, 2.5 * da3_sig_p_);
         blocked(ms_since(tb));
       }
     }
@@ -773,6 +861,17 @@ void LoopCloser::process(int kf, const cv::Mat& img, bool depth) {
     std::printf("    loop @frame %d <-> %d: %d Sim(3) inliers, scale ratio %.2f, edge chi2 %.1f -> PGO cost %.1f (edge %.1f)", a,
                 best->j, best->inliers, best->S.s, chi2_new, cost, chi2_post);
     if (at >= 0) std::printf(" -> map corrected (tracking at frame %d)", at);
+    {  // 측정한 상대 포즈 (GT 와 비교용): 회전 (축각 벡터, rad), 이동 (cam_j -> cam_i, VO 단위), 스케일
+      const Eigen::AngleAxisd aa(best->S.R);
+      const Vec3 w = aa.angle() * aa.axis();
+      std::printf(" | S w %.5f %.5f %.5f t %.4f %.4f %.4f s %.4f", w(0), w(1), w(2), best->S.t(0), best->S.t(1), best->S.t(2),
+                  best->S.s);
+    }
+    if (best->H.trace() > 0) {  // 재투영 정제가 주는 측정 표준편차 (1 px 잡음 가정): 정보행렬 보정용
+      const Eigen::Matrix<double, 7, 7> C = best->H.inverse();
+      std::printf(" | refine sigma r %.4f t %.4f s %.4f", std::sqrt(C.diagonal().head<3>().mean()),
+                  std::sqrt(C.diagonal().segment<3>(3).mean()), std::sqrt(C(6, 6)));
+    }
     std::printf("\n");
   }
   ms_pgo += ms_since(t0);
@@ -782,7 +881,7 @@ std::unordered_map<int, Sim3> LoopCloser::pgo(const std::vector<Pose>& P, const 
   // 정점 = 키프레임 Sim(3) (world -> cam), 초기값 = P (sub 순서). 엣지 = 보관된 측정 (없는 오도메트리는 P 로)
   auto pose_sim3 = [&](size_t n) { return Sim3{1.0, P[n].R, P[n].t}; };
   for (size_t n = 0; n + 1 < sub.size(); ++n)
-    if (!odom_.count(sub[n])) odom_[sub[n]] = pose_sim3(n + 1) * pose_sim3(n).inverse();
+    if (!odom_.count(sub[n]) || n + 1 + prm_.odom_refresh >= sub.size()) odom_[sub[n]] = pose_sim3(n + 1) * pose_sim3(n).inverse();
 
   // ORB-SLAM3 essential graph 와 같은 설정: Sim(3) 정점뿐이라 고정 7x7 블록 (BlockSolverX 보다 반복당 ~2.4배 빠름),
   // lambda 1e-16 (거의 Gauss-Newton 으로 시작), 20회. 같은 그래프에서 30회 X 솔버와 같은 cost 로 수렴 (00, 06 확인)
@@ -809,7 +908,8 @@ std::unordered_map<int, Sim3> LoopCloser::pgo(const std::vector<Pose>& P, const 
     e->setInformation(I);
     opt.addEdge(e);
   };
-  for (size_t n = 0; n + 1 < sub.size(); ++n) add_edge(sub[n], sub[n + 1], odom_[sub[n]], kInfoOdom);
+  const Eigen::Matrix<double, 7, 7> info_odom = info(0.005, prm_.odom_sigma_t, prm_.odom_sigma_s);
+  for (size_t n = 0; n + 1 < sub.size(); ++n) add_edge(sub[n], sub[n + 1], odom_[sub[n]], info_odom);
   for (const auto& e : edges_)
     if (v.count(e.i) && v.count(e.j)) add_edge(e.j, e.i, e.S, loop_info(e));
   if (a_ref_ > 0)  // metric depth 앵커: log s_k = log a_k - log a_ref (보정 뒤 VO 단위/미터 a_k / s_k = a_ref)
@@ -818,7 +918,8 @@ std::unordered_map<int, Sim3> LoopCloser::pgo(const std::vector<Pose>& P, const 
         auto* e = new EdgeScalePrior();
         e->setVertex(0, v[f]);
         e->setMeasurement(std::log(ak / a_ref_));
-        e->setInformation(Eigen::Matrix<double, 1, 1>::Constant(1 / (prm_.anchor_sigma * prm_.anchor_sigma)));
+        const double sa = prm_.da3_adaptive ? std::max(prm_.anchor_sigma, 1.3 * da3_sig_f_) : prm_.anchor_sigma;  // KITTI σ_f ~0.06 -> 0.08
+        e->setInformation(Eigen::Matrix<double, 1, 1>::Constant(1 / (sa * sa)));
         auto* rk = new g2o::RobustKernelHuber();
         rk->setDelta(2.0);  // 2 sigma 넘는 앵커 (가림, 하늘, 차) 는 선형으로
         e->setRobustKernel(rk);

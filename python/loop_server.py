@@ -31,6 +31,7 @@ depth anchor     (--depth): da3 (Depth Anything 3 DA3NESTED-GIANT-LARGE metric d
 usage: python3 loop_server.py --pr mast3r --ver mast3r [--depth da3] [--device cuda]
 """
 import argparse
+import hashlib
 import sys
 from pathlib import Path
 
@@ -192,14 +193,36 @@ class Mast3r:
 class Da3Depth:
     RES, ZMIN, ZMAX = 1008, 3.0, 40.0  # DA3 깊이 이 범위의 점만 (가까운 곳은 편향 크고 먼 곳은 VO 깊이가 부정확)
 
-    def __init__(self, device):
+    def __init__(self, device, cache=None):
+        # cache: 디렉터리면 영상 해시별 깊이 맵 (fp16) 을 저장 / 재사용 -> 실행끼리 결정적 + 캐시가 차면 GPU 안 씀 (모델은 처음 놓칠 때 로드)
+        self.device, self.cache, self.net = device, Path(cache) if cache else None, None
+        if self.cache:
+            self.cache.mkdir(parents=True, exist_ok=True)
+        else:
+            self.load()
+
+    def load(self):
         sys.path.insert(0, str(DA3_REPO / "src"))
         from depth_anything_3.api import DepthAnything3
-        self.net = DepthAnything3.from_pretrained("depth-anything/DA3NESTED-GIANT-LARGE").to(device).eval()
+        self.net = DepthAnything3.from_pretrained("depth-anything/DA3NESTED-GIANT-LARGE").to(self.device).eval()
+        if self.cache:
+            log("[loop_server] DA3 model loaded (depth cache miss)")
 
     @torch.no_grad()
+    def depth_map(self, bgr):
+        f = self.cache / f"{hashlib.md5(bgr.tobytes()).hexdigest()}_{self.RES}.npy" if self.cache else None
+        if f is not None and f.exists():
+            return np.load(f).astype(np.float32)
+        if self.net is None:
+            self.load()
+        d = self.net.inference([cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)], process_res=self.RES).depth[0]
+        if f is not None:
+            np.save(f, d.astype(np.float16))
+            d = d.astype(np.float16).astype(np.float32)  # 캐시를 쓴 실행과 똑같은 값
+        return d
+
     def at(self, bgr, uv):  # DA3 metric depth [m] at pixels uv (n, 2). 깊이 맵은 sample() 용으로 남겨 둠
-        self.dep = self.net.inference([cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)], process_res=self.RES).depth[0]
+        self.dep = self.depth_map(bgr)
         self.sy, self.sx = self.dep.shape[0] / bgr.shape[0], self.dep.shape[1] / bgr.shape[1]
         return self.sample(uv)
 
@@ -221,13 +244,14 @@ def main():
     ap.add_argument("--ver", default="none", choices=["none", "mast3r"])
     ap.add_argument("--depth", default="none", choices=["none", "da3"])
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--depth-cache", default="", help="directory for DA3 depth maps keyed by image hash (deterministic, GPU-free reruns)")
     ap.add_argument("--depth-range", default="3,40", help="DA3 depth used for anchors / priors / 3D [m] (indoor: 0.5,20)")
     o = ap.parse_args()
     Da3Depth.ZMIN, Da3Depth.ZMAX = (float(x) for x in o.depth_range.split(","))
     m3r = Mast3r(o.device, retrieval=o.pr == "mast3r") if "mast3r" in (o.pr, o.ver) else None  # 검색/검증이 공유
     pr = {"none": None, "netvlad": NetVLAD, "salad": Salad, "mast3r": None}[o.pr]
     pr = pr(o.device) if pr else None
-    depth = Da3Depth(o.device) if o.depth == "da3" else None
+    depth = Da3Depth(o.device, o.depth_cache or None) if o.depth == "da3" else None
     log(f"[loop_server] ready: pr={o.pr} ver={o.ver} depth={o.depth} device={o.device}")
     desc, last_img, depth_kf = {}, {}, -1
     for line in sys.stdin:
