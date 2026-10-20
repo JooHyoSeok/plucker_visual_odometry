@@ -205,7 +205,7 @@ int main(int argc, char** argv) {
   prm.ba_lines = flag(argc, argv, "--ba-lines");  // 실험: local / 전역 BA 에 Plücker 라인 (orthonormal 4-DoF)
   prm.ba_line_depth_sigma = std::atof(arg(argc, argv, "--ba-line-prior", "0"));  // 실험: 라인 끝점 DA3 log-depth prior σ
   prm.ba_line_nowrite = flag(argc, argv, "--ba-line-nowrite");  // 실험: BA 라인을 맵에 안 써넣음 (포즈 제약만)
-  prm.ba_vp_sigma = std::atof(arg(argc, argv, "--ba-vp", "0"));  // 실험: local BA 구조 방향 (소실점) 제약 σ [px]
+  prm.ba_vp_sigma = std::atof(arg(argc, argv, "--ba-vp", "0.5"));  // local BA 구조 방향 (소실점) 제약 σ [px], 0 = 끔 (PROGRESS L4)
   const char* depth_pat = arg(argc, argv, "--depth", nullptr);  // iPhone LiDAR 같은 프레임별 metric depth 영상 (RGB-D 모드)
   const char* conf_pat = arg(argc, argv, "--depth-conf", nullptr);
   const int conf_min = std::atoi(arg(argc, argv, "--depth-conf-min", "2"));

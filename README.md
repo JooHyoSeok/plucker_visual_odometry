@@ -43,14 +43,16 @@ cpp/build/run_vo --video dataset/sequences/00/image_2/%06d.png --gt dataset/pose
 - The default is the best configuration so far (PROGRESS.md sections 10-12): loop closure (thumbnail retrieval, ORB / Sim(3)
   verification refined by bidirectional reprojection, Sim(3) pose graph in a loop thread), DA3 metric depth
   (DA3METRIC-LARGE in `python/loop_server.py`, Apache 2.0, ~3 GB GPU, 27 ms per KITTI keyframe, inferred online) as scale anchors in the pose
-  graph, per-point log-depth priors in local BA, single-view Plücker lines and 3D for loop verification, local BA in a
+  graph, per-point log-depth priors in local BA, single-view Plücker lines and 3D for loop verification, structural-direction
+  (vanishing point) constraints from line segments in local BA against rotation drift (`--ba-vp 0.5` px), local BA in a
   LocalMapping thread (bad observations dropped, points kept), map reuse by ORB projection search, tracking-failure recovery
   and a fallback initialization from DA3 depth, and one global BA at the end (`*_pregba.txt` = the same run before it).
 - Options: `--no-loop`, `--no-da3` (plain monocular, no Python / GPU), `--no-viewer`, `--autostart` (skip the viewer start
   menu, where loop closure / detector / verifier / lines / DA3 can be chosen). Without `--calib fx,fy,cx,cy` the intrinsics
   come from `calib.txt` next to the image folder (KITTI odometry, EuRoC converter output). Unknown options are an error.
-- Results: KITTI 00, 02-10 threaded with online DA3 (one run each) Sim(3) ATE 2.99 / 15.55 / 2.22 / 1.17 / 2.83 / 4.40 /
-  0.84 / 10.96 / 7.57 / 2.68 m, mean 5.12 m (ORB-SLAM + GBA 11.13); EuRoC MH_01 / V1_01 / V2_01 (`--sync`) 0.47 / 0.23 / 0.12 m.
+- Results: KITTI 00, 02-10 threaded with online DA3 (one run each) Sim(3) ATE 2.71 / 16.16 / 2.24 / 1.07 / 3.00 / 3.88 /
+  0.98 / 8.38 / 7.48 / 2.04 m, mean 4.79 m (5.12 without structural directions, ORB-SLAM + GBA 11.13); EuRoC MH_01 / V1_01 /
+  V2_01 (`--sync`, DA3 cache) 0.44 / 0.29 / 0.14 m (threaded, 3 runs: 0.51 / 0.22 / 0.12).
   Table with other methods: `cpp/tools/kitti_table_tex.py` (LaTeX -> PDF / PNG).
 - Experiment options: `[N_FRAMES]`, `--sync` (loop closure and local BA inline: deterministic), `--da3-cache DIR` (DA3 depth
   maps stored by image hash: identical runs without GPU, for comparisons only; fill with `cpp/tools/da3_cache.py`),
@@ -58,7 +60,9 @@ cpp/build/run_vo --video dataset/sequences/00/image_2/%06d.png --gt dataset/pose
   `--dump-map FILE`, `--snapshot FILE`, `--loop-pr thumb|netvlad|salad|mast3r`, `--loop-ver orb|mast3r|orb+mast3r` (learned
   modules in `python/loop_server.py`, MASt3R is CC BY-NC-SA), `--loop-python PY`, `--da3-range MIN,MAX` (default from the DA3
   depth of the first frame: indoor 0.5-20 m, outdoor 3-40 m), `--da3-model metric|nested` (nested = DA3NESTED-GIANT-LARGE,
-  1.40B, CC BY-NC, 3.3x slower), `--depth PATTERN` (per-frame metric depth, e.g. iPhone LiDAR).
+  1.40B, CC BY-NC, 3.3x slower), `--depth PATTERN` (per-frame metric depth, e.g. iPhone LiDAR), `--ba-vp SIGMA`
+  (structural directions, 0 = off), `--pgo-vp` (directions also in the Sim(3) pose graph), `--ba-lines` (Plücker lines in
+  local / global BA), `--ba-line-prior SIGMA` (DA3 endpoint depth prior for them), `--ba-line-nowrite`.
 - KITTI in the viewer, one sequence after another, then an ATE table: `cpp/tools/run_kitti_viewer.sh [OUT_DIR] [SEQ ...]`.
 - Result tools: `cpp/tools/make_video.py` (image + trajectory + error/local-scale panel; run_vo `--traj-online`),
   `cpp/tools/plot_traj.py --paper` (paper-style trajectory figure, PNG + PDF), `cpp/tools/plot_vs_orbslam.py`.
