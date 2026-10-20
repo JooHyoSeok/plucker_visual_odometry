@@ -509,4 +509,7 @@ EuRoC: `cpp/tools/euroc_to_kitti.py` (cam0 왜곡 보정, GT 몸체 → cam0, �
   (`out_bench/plots/coda0_traj.png`).
 - 7-Scenes chess seq-01 (`cpp/tools/run_7scenes.sh`: 없으면 내려받고 GT 변환, Kinect RGB 공칭 525 / 320 / 240): 프레임 38 DA3 초기화,
   Sim(3) ATE 0.05 m / 9.2 m (SE(3) 0.06 m), 38.8 fps (`out_bench/plots/7scenes_chess01.png`).
+- 7-Scenes seq-01 세 장면 (`out_bench/plots/7scenes_3.png`, 초기화 뒤 끊김 없음): chess 5.5 cm / 9.2 m, heads 7.2 cm / 7.1 m (깊이 0.8 m,
+  2-view 초기화라 VO 단위), stairs 4.0 cm / 4.5 m. RGB 내부 파라미터 525 vs 보정 추정 532.57 / 531.54 (같은 DA3 캐시, 동기식):
+  chess 46.6 / 46.4, heads 73.4 / 61.1, stairs 46.3 / 33.0 mm → 스크립트 기본을 532.57 / 531.54 로. GT 시간 어긋남 없음 (shift 0 최소).
 

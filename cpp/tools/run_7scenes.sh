@@ -4,7 +4,8 @@
 # usage: cpp/tools/run_7scenes.sh [SCENE=chess] [SEQ=01] [run_vo 인자 ...]
 #   데이터: /home/hyoseok/Desktop/hyoseok/7-Scenes/SCENE/seq-SEQ/frame-%06d.color.png, frame-%06d.pose.txt (4x4 camera-to-world)
 #   GT: SCENE/seq-SEQ/kitti/poses.txt (프레임마다 3x4), 결과: out_bench/7scenes/SCENE_seqSEQ{.txt,_pregba.txt,.log}
-#   내부 파라미터: 데이터셋이 RGB 카메라 보정값을 주지 않음 -> Kinect v1 RGB 공칭값 fx = fy = 525, cx = 320, cy = 240
+#   내부 파라미터: 데이터셋이 RGB 카메라 보정값을 주지 않음 -> 보정 추정값 fx 532.57, fy 531.54, cx 320, cy 240
+#   (Kinect 공칭 525 보다 같은 DA3 깊이 결정적 실행에서 chess 46.6 -> 46.4, heads 73.4 -> 61.1, stairs 46.3 -> 33.0 mm)
 ROOT=/home/hyoseok/Desktop/hyoseok/Visual_SLAM_for_Study/vo_plucker
 DATA=/home/hyoseok/Desktop/hyoseok/7-Scenes
 PY=/home/hyoseok/miniconda3/envs/mast3r/bin/python
@@ -35,7 +36,7 @@ print(f"{d}: {len(P)} GT poses, path {np.linalg.norm(np.diff(C, axis=0), axis=1)
 EOF
 set +e
 OUT=$ROOT/out_bench/7scenes/${SCENE}_seq$SEQ
-stdbuf -oL -eL "$ROOT/cpp/build/run_vo" --video "$D/frame-%06d.color.png" --calib 525,525,320,240 --gt "$D/kitti/poses.txt" \
+stdbuf -oL -eL "$ROOT/cpp/build/run_vo" --video "$D/frame-%06d.color.png" --calib 532.57,531.54,320,240 --gt "$D/kitti/poses.txt" \
   --traj "$OUT.txt" --autostart "$@" 2>&1 | tee "$OUT.log"
 echo "=== $SCENE seq-$SEQ ==="
 grep -E "frames tracked|^ATE" "$OUT.log"
